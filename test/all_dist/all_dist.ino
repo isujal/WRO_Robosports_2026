@@ -1,19 +1,15 @@
 // ============================================================
-//  Rectangle Trajectory + Intake + Shooter Servo
+//  Rectangle Trajectory + Intake + Shooter Servo + VL53L0X
 //  BNO085 + MDD 3A + ESP32-S3
 //
-//  Servo: proven LEDC approach from PS5 bot (14-bit, 50Hz)
-//  IMU:   SH2_GAME_ROTATION_VECTOR — no magnetic drift
-//  Intake: runs full trajectory at set speed
+//  IMU   : Wire  (SDA=18, SCL=17)
+//  VL53L0X: Wire1 (SDA=13, SCL=14)
+//  Distance printed in cm alongside every serial print
 // ============================================================
 
 #include <Wire.h>
 #include <Adafruit_BNO08x.h>
-
-int pause_ms = 150;
-
-int long_pause = 750;
-int breadth_pause = 300;
+#include <Adafruit_VL53L0X.h>
 
 // -------- Drive Motor Pins --------
 const int M1A = 6;
@@ -21,25 +17,29 @@ const int M1B = 7;
 const int M2A = 15;
 const int M2B = 16;
 
-// -------- IMU Pins --------
+// -------- IMU Pins (Wire — Bus 0) --------
 #define BNO08X_SDA 18
 #define BNO08X_SCL 17
 #define BNO08X_RST 12
 
+// -------- VL53L0X Pins (Wire1 — Bus 1) --------
+#define TOF_SDA 13
+#define TOF_SCL 14
+
 // -------- Intake Motor Pins --------
 const int INTAKE_IN1   = 10;
 const int INTAKE_IN2   = 9;
-const int INTAKE_SPEED = 255;   // 0–255
+const int INTAKE_SPEED = 255;
 
-// -------- Servo (proven from PS5 bot — 14-bit LEDC) --------
+// -------- Servo (14-bit LEDC) --------
 #define SERVO_PIN 4
 constexpr uint32_t SERVO_PWM_FREQ = 50;
 constexpr uint8_t  SERVO_PWM_RES  = 14;
 constexpr uint16_t SERVO_MIN_DUTY = (uint16_t)((500  * 16384L) / 20000);
 constexpr uint16_t SERVO_MAX_DUTY = (uint16_t)((2400 * 16384L) / 20000);
 
-const int SERVO_INTAKE_POS = 90;   // normal running position
-const int SERVO_SHOOT_POS  = 135;  // shooting position after Side 1
+const int SERVO_INTAKE_POS = 90;
+const int SERVO_SHOOT_POS  = 135;
 
 // ============================================================
 //  FORWARD PID CONSTANTS
@@ -69,9 +69,14 @@ Adafruit_BNO08x   bno(BNO08X_RST);
 sh2_SensorValue_t imuData;
 float yawOffset = 0.0;
 
+// -------- VL53L0X --------
+Adafruit_VL53L0X lox;
+
 // -------- Function Prototypes --------
 void     initIMU();
 void     zeroIMU();
+void     initTOF();
+float    getDistanceCm();
 float    getRawYaw();
 float    getHeading();
 float    shortestError(float target, float current);
@@ -85,7 +90,7 @@ void     turnClockwise(int speed);
 void     turnAntiClockwise(int speed);
 void     motorsStop();
 void     setMotorPins();
-void     pause(int ms);
+void     waitMs(int ms);
 void     initIntake();
 void     intakeOn();
 void     intakeOff();
@@ -107,74 +112,93 @@ void setup() {
   initIMU();
   zeroIMU();
 
+  initTOF();
+
   Serial.println("Ready. Starting in 2 seconds...");
   delay(2000);
 }
 
-
+// ============================================================
 void loop() {
-    zeroIMU();   // re-zero each lap if bot returns to start
+  zeroIMU();
 
   intakeOn();
+  Serial.println("Intake ON");
 
-    Serial.println("Intake ON");
-
-  // ---- Servo at 90° ----
   servoWrite(SERVO_INTAKE_POS);
   Serial.println("Servo at 90deg");
 
   // ============================================================
-  //  RECTANGLE SEQUENCE — runs forever
+  //  RECTANGLE SEQUENCE
   // ============================================================
 
-  Serial.println("=== SIDE 1: Forward 1500ms @ 0deg ===");
-  executeDrive(long_pause, 0.0);
-  pause(pause_ms);
+  Serial.println("=== SIDE 1: Forward 750ms @ 0deg ===");
+  executeDrive(750, 0.0);
+  waitMs(150);
 
-  Serial.println("=== SHOOTER: 135deg → 750ms → 90deg ===");
+  Serial.println("=== SHOOTER: 135deg → 250ms → 90deg ===");
   servoShoot();
-  pause(pause_ms);
+  waitMs(150);
 
   Serial.println("=== TURN 1: To 90deg ===");
   executeTurn(90.0);
-  pause(pause_ms);
+  waitMs(150);
 
-  Serial.println("=== SIDE 2: Forward 1500ms @ 90deg ===");
-  executeDrive(breadth_pause, 90.0);
-  pause(pause_ms);
+  Serial.println("=== SIDE 2: Forward 350ms @ 90deg ===");
+  executeDrive(350, 90.0);
+  waitMs(150);
 
   Serial.println("=== TURN 2: To 180deg ===");
   executeTurn(180.0);
-  pause(pause_ms);
+  waitMs(150);
 
-  Serial.println("=== SIDE 3: Forward 1500ms @ 180deg ===");
-  executeDrive(long_pause, 180.0);
-  pause(pause_ms);
+  Serial.println("=== SIDE 3: Forward 750ms @ 180deg ===");
+  executeDrive(750, 180.0);
+  waitMs(150);
 
   Serial.println("=== TURN 3: To -90deg ===");
   executeTurn(-90.0);
-  pause(pause_ms);
+  waitMs(150);
 
-  Serial.println("=== SIDE 4: Forward 1500ms @ -90deg ===");
-  executeDrive(breadth_pause, -90.0);
-  pause(pause_ms);
+  Serial.println("=== SIDE 4: Forward 350ms @ -90deg ===");
+  executeDrive(350, -90.0);
+  waitMs(150);
 
   Serial.println("=== TURN 4: Back to 0deg ===");
   executeTurn(0.0);
-  pause(pause_ms);
+  waitMs(150);
 
   Serial.println("=== RECTANGLE COMPLETE — RESTARTING ===");
-  // loop() returns here and immediately starts again
+}
+
+// ============================================================
+//  initTOF()
+//  Initializes VL53L0X on Wire1 (Bus 1)
+// ============================================================
+void initTOF() {
+  Wire1.begin(TOF_SDA, TOF_SCL);
+  if (!lox.begin(0x29, false, &Wire1)) {
+    Serial.println("VL53L0X not found! Check wiring.");
+    while (1) delay(10);
+  }
+  Serial.println("VL53L0X Ready.");
+}
+
+// ============================================================
+//  getDistanceCm()
+//  Returns distance in cm. Returns -1 if out of range.
+// ============================================================
+float getDistanceCm() {
+  VL53L0X_RangingMeasurementData_t measure;
+  lox.rangingTest(&measure, false);
+  if (measure.RangeStatus != 4) {
+    return measure.RangeMilliMeter / 10.0;
+  }
+  return -1.0;  // out of range
 }
 
 // ============================================================
 //  SERVO FUNCTIONS
-// ============================================================
-
-// ============================================================
-//  servoWrite()
-//  Converts angle to 14-bit duty cycle and writes via LEDC.
-//  Same exact approach as PS5 bot — proven on ESP32-S3 core 3.x
 // ============================================================
 void servoWrite(int angle) {
   angle = constrain(angle, 0, 180);
@@ -182,10 +206,6 @@ void servoWrite(int angle) {
   ledcWrite(SERVO_PIN, duty);
 }
 
-// ============================================================
-//  initServo()
-//  Attaches LEDC to servo pin, parks at 90°.
-// ============================================================
 void initServo() {
   ledcAttach(SERVO_PIN, SERVO_PWM_FREQ, SERVO_PWM_RES);
   servoWrite(SERVO_INTAKE_POS);
@@ -193,10 +213,6 @@ void initServo() {
   Serial.println("Servo ready at 90deg.");
 }
 
-// ============================================================
-//  servoShoot()
-//  90° → 135° → hold 300ms → back to 90° → settle 300ms
-// ============================================================
 void servoShoot() {
   Serial.println("Servo: 90 → 135deg");
   servoWrite(SERVO_SHOOT_POS);
@@ -209,7 +225,6 @@ void servoShoot() {
 // ============================================================
 //  INTAKE FUNCTIONS
 // ============================================================
-
 void initIntake() {
   pinMode(INTAKE_IN1, OUTPUT);
   pinMode(INTAKE_IN2, OUTPUT);
@@ -217,10 +232,6 @@ void initIntake() {
   analogWrite(INTAKE_IN2, 0);
 }
 
-// ============================================================
-//  intakeOn()
-//  IN1=0, IN2=INTAKE_SPEED — same direction as intake_test.ino
-// ============================================================
 void intakeOn() {
   analogWrite(INTAKE_IN1, 0);
   analogWrite(INTAKE_IN2, INTAKE_SPEED);
@@ -232,7 +243,7 @@ void intakeOff() {
 }
 
 // ============================================================
-//  ALL RECTANGLE FUNCTIONS — unchanged
+//  ALL RECTANGLE FUNCTIONS
 // ============================================================
 
 float getRawYaw() {
@@ -296,16 +307,17 @@ void executeTurn(float targetAngle) {
         prevErr = error;
         stableCount++;
 
+        float dist = getDistanceCm();
         Serial.print("Stable "); Serial.print(stableCount);
         Serial.print("/"); Serial.print(TRN_STABLE_COUNT);
         Serial.print(" | H:"); Serial.print(heading, 1);
-        Serial.print(" Target:"); Serial.print(targetAngle, 1);
-        Serial.print(" E:"); Serial.println(error, 1);
+        Serial.print(" E:"); Serial.print(error, 1);
+        Serial.print(" | Dist:");
+        if (dist >= 0) { Serial.print(dist, 1); Serial.println("cm"); }
+        else             Serial.println("OOR");
 
         if (stableCount >= TRN_STABLE_COUNT) {
-          Serial.print("Turn done. Heading: ");
-          Serial.print(heading, 1);
-          Serial.println("deg");
+          Serial.print("Turn done. H:"); Serial.print(heading, 1); Serial.println("deg");
           return;
         }
 
@@ -317,16 +329,23 @@ void executeTurn(float targetAngle) {
   }
 }
 
+// ============================================================
+//  runForwardPID()
+// ============================================================
 void runForwardPID(float targetHeading, float &prevErr, float &integ) {
   float heading = getHeading();
   float error   = shortestError(targetHeading, heading);
   float dt      = FWD_INTERVAL / 1000.0;
+  float dist    = getDistanceCm();
 
   if (abs(error) <= FWD_DEADBAND) {
     integ   = 0.0;
     prevErr = error;
     driveMotors(FWD_BASE_SPEED, FWD_BASE_SPEED);
-    Serial.print("FWD STRAIGHT | H:"); Serial.print(heading, 1); Serial.println("deg");
+    Serial.print("FWD STRAIGHT | H:"); Serial.print(heading, 1);
+    Serial.print(" | Dist:");
+    if (dist >= 0) { Serial.print(dist, 1); Serial.println("cm"); }
+    else             Serial.println("OOR");
     return;
   }
 
@@ -348,13 +367,20 @@ void runForwardPID(float targetHeading, float &prevErr, float &integ) {
   Serial.print(" E:"); Serial.print(error, 1);
   Serial.print(" Corr:"); Serial.print(correction, 1);
   Serial.print(" L:"); Serial.print(leftSpeed);
-  Serial.print(" R:"); Serial.println(rightSpeed);
+  Serial.print(" R:"); Serial.print(rightSpeed);
+  Serial.print(" | Dist:");
+  if (dist >= 0) { Serial.print(dist, 1); Serial.println("cm"); }
+  else             Serial.println("OOR");
 }
 
+// ============================================================
+//  runTurnPID()
+// ============================================================
 void runTurnPID(float targetAngle, float &prevErr, float &integ) {
   float heading = getHeading();
   float error   = shortestError(targetAngle, heading);
   float dt      = TRN_INTERVAL / 1000.0;
+  float dist    = getDistanceCm();
 
   integ += error * dt;
   integ  = constrain(integ, -100, 100);
@@ -373,16 +399,20 @@ void runTurnPID(float targetAngle, float &prevErr, float &integ) {
   Serial.print("TRN | H:"); Serial.print(heading, 1);
   Serial.print(" Target:"); Serial.print(targetAngle, 1);
   Serial.print(" E:"); Serial.print(error, 1);
-  Serial.print(" Spd:"); Serial.println(speed);
+  Serial.print(" Spd:"); Serial.print(speed);
+  Serial.print(" | Dist:");
+  if (dist >= 0) { Serial.print(dist, 1); Serial.println("cm"); }
+  else             Serial.println("OOR");
 }
 
+// ============================================================
 float wrapAngle(float a) {
   while (a >  180.0) a -= 360.0;
   while (a < -180.0) a += 360.0;
   return a;
 }
 
-void pause(int ms) {
+void waitMs(int ms) {
   motorsStop();
   delay(ms);
 }
