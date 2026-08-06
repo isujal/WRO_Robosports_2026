@@ -1,10 +1,7 @@
 // ============================================================
 //  Rectangle Trajectory + Intake + Shooter Servo + VL53L0X
 //  BNO085 + MDD 3A + ESP32-S3
-//
-//  IMU   : Wire  (SDA=18, SCL=17)
-//  VL53L0X: Wire1 (SDA=13, SCL=14)
-//  Distance printed in cm alongside every serial print
+//  MODIFIED: Long sides use TOF distance trigger (<12cm) to stop
 // ============================================================
 
 #include <Wire.h>
@@ -12,9 +9,10 @@
 #include <Adafruit_VL53L0X.h>
 
 int pause_ms = 150;
+int breadth_pause = 450;
+int reset_pause = 400;
 
-int long_pause = 800;
-int breadth_pause = 300;
+const float STOP_DISTANCE_CM = 12.0;  // Stop threshold on long sides
 
 // -------- Drive Motor Pins --------
 const int M1A = 6;
@@ -52,7 +50,7 @@ const int SERVO_SHOOT_POS  = 135;
 const float FWD_KP          = 2.6;
 const float FWD_KI          = 0.0;
 const float FWD_KD          = 0.5;
-const int   FWD_BASE_SPEED  = 255;
+const int   FWD_BASE_SPEED  = 180;   // Slowed down so TOF has time to react
 const int   FWD_MAX_CORRECT = 60;
 const float FWD_DEADBAND    = 1.5;
 const int   FWD_INTERVAL    = 20;
@@ -60,14 +58,14 @@ const int   FWD_INTERVAL    = 20;
 // ============================================================
 //  TURN PID CONSTANTS
 // ============================================================
-const float TRN_KP           = 2.95;
+const float TRN_KP           = 5; //3.25;
 const float TRN_KI           = 0.0;
 const float TRN_KD           = 0.8;
-const int   TRN_MIN_SPEED    = 60; //60
+const int   TRN_MIN_SPEED    = 60;
 const int   TRN_MAX_SPEED    = 255;
-const float TRN_DEADBAND     = 2.0; //2.0
-const int   TRN_INTERVAL     = 20; //20
-const int   TRN_STABLE_COUNT = 8; //8
+const float TRN_DEADBAND     = 10.0;
+const int   TRN_INTERVAL     = 20;
+const int   TRN_STABLE_COUNT = 8;
 
 // -------- IMU --------
 Adafruit_BNO08x   bno(BNO08X_RST);
@@ -87,9 +85,9 @@ float    getHeading();
 float    shortestError(float target, float current);
 float    wrapAngle(float a);
 void     executeDrive(unsigned long durationMs, float targetHeading);
+void     executeDriveUntilClose(float targetHeading, float stopDistCm);  // NEW
 void     executeTurn(float targetAngle);
 void     runForwardPID(float targetHeading, float &prevErr, float &integ);
-void     runTurnPID(float targetAngle, float &prevErr, float &integ);
 void     driveMotors(int leftSpeed, int rightSpeed);
 void     turnClockwise(int speed);
 void     turnAntiClockwise(int speed);
@@ -106,7 +104,7 @@ void     servoShoot();
 // ============================================================
 void setup() {
   Serial.begin(115200);
-  while (!Serial) delay(10);
+  // while (!Serial) delay(10);
 
   setMotorPins();
   motorsStop();
@@ -121,11 +119,15 @@ void setup() {
 
   Serial.println("Ready. Starting in 2 seconds...");
   delay(2000);
+        zeroIMU();
+
+
 }
 
 // ============================================================
 void loop() {
-  zeroIMU();
+
+
 
   intakeOn();
   Serial.println("Intake ON");
@@ -137,8 +139,9 @@ void loop() {
   //  RECTANGLE SEQUENCE
   // ============================================================
 
-  Serial.println("=== SIDE 1: Forward 750ms @ 0deg ===");
-  executeDrive(long_pause, 0.0);
+  // SIDE 1: Drive until wall is <12cm (distance-triggered stop)
+  Serial.println("=== SIDE 1: Forward until <12cm @ 0deg ===");
+  executeDriveUntilClose(0.0, STOP_DISTANCE_CM);
   waitMs(pause_ms);
 
   Serial.println("=== SHOOTER: 135deg → 250ms → 90deg ===");
@@ -146,39 +149,96 @@ void loop() {
   waitMs(pause_ms);
 
   Serial.println("=== TURN 1: To 90deg ===");
-  executeTurn(90.0);
+  executeTurn(45.0);
   waitMs(pause_ms);
 
-  Serial.println("=== SIDE 2: Forward 350ms @ 90deg ===");
+  // SIDE 2: Short side, time-based
+  Serial.println("=== SIDE 2: Forward 300ms @ 90deg ===");
   executeDrive(breadth_pause, 90.0);
   waitMs(pause_ms);
 
   Serial.println("=== TURN 2: To 180deg ===");
-  executeTurn(180.0);
+  executeTurn(135.0);
   waitMs(pause_ms);
 
-  Serial.println("=== SIDE 3: Forward 750ms @ 180deg ===");
-  executeDrive(long_pause, 180.0);
+  // SIDE 3: Drive until wall is <12cm (distance-triggered stop)
+  Serial.println("=== SIDE 3: Forward until <12cm @ 180deg ===");
+  executeDriveUntilClose(180.0, STOP_DISTANCE_CM);
   waitMs(pause_ms);
 
   Serial.println("=== TURN 3: To -90deg ===");
-  executeTurn(-90.0);
+  executeTurn(-135.0);
   waitMs(pause_ms);
 
-  Serial.println("=== SIDE 4: Forward 350ms @ -90deg ===");
+  // SIDE 4: Short side, time-based
+  Serial.println("=== SIDE 4: Forward 300ms @ -90deg ===");
   executeDrive(breadth_pause, -90.0);
   waitMs(pause_ms);
 
   Serial.println("=== TURN 4: Back to 0deg ===");
-  executeTurn(0.0);
+  executeTurn(-45.0);
   waitMs(pause_ms);
+
+  // executeDrive(reset_pause, 0.0);
+  // waitMs(pause_ms);
+
 
   Serial.println("=== RECTANGLE COMPLETE — RESTARTING ===");
 }
 
 // ============================================================
+//  executeDriveUntilClose()
+//  Drives forward with heading PID until TOF reads < stopDistCm.
+//  Falls back to a max timeout (5 seconds) as a safety net.
+// ============================================================
+void executeDriveUntilClose(float targetHeading, float stopDistCm) {
+  float prevErr = 0.0;
+  float integ   = 0.0;
+  unsigned long lastPIDTime = millis();
+  unsigned long startTime   = millis();
+  const unsigned long MAX_TIMEOUT = 2000;  // 5s safety fallback
+
+  while (true) {
+    // Safety timeout — never run forever
+    if (millis() - startTime > MAX_TIMEOUT) {
+      Serial.println("TOF drive: MAX TIMEOUT reached, stopping.");
+      break;
+    }
+
+    unsigned long now = millis();
+    if (now - lastPIDTime >= FWD_INTERVAL) {
+      lastPIDTime = now;
+
+      // Check distance FIRST before moving
+      float dist = getDistanceCm();
+
+      Serial.print("TOF Drive | Dist:");
+      if (dist >= 0) {
+        Serial.print(dist, 1);
+        Serial.print("cm");
+      } else {
+        Serial.print("OOR");
+      }
+
+      // Stop condition: valid reading AND below threshold
+      if (dist > 0 && dist < stopDistCm) {
+        Serial.println(" → STOP (wall detected)");
+        motorsStop();
+        break;
+      }
+
+      Serial.println();
+
+      // Drive straight with heading PID
+      runForwardPID(targetHeading, prevErr, integ);
+    }
+  }
+
+  motorsStop();
+}
+
+// ============================================================
 //  initTOF()
-//  Initializes VL53L0X on Wire1 (Bus 1)
 // ============================================================
 void initTOF() {
   Wire1.begin(TOF_SDA, TOF_SCL);
@@ -191,7 +251,6 @@ void initTOF() {
 
 // ============================================================
 //  getDistanceCm()
-//  Returns distance in cm. Returns -1 if out of range.
 // ============================================================
 float getDistanceCm() {
   VL53L0X_RangingMeasurementData_t measure;
@@ -199,7 +258,7 @@ float getDistanceCm() {
   if (measure.RangeStatus != 4) {
     return measure.RangeMilliMeter / 10.0;
   }
-  return -1.0;  // out of range
+  return -1.0;
 }
 
 // ============================================================
@@ -248,9 +307,8 @@ void intakeOff() {
 }
 
 // ============================================================
-//  ALL RECTANGLE FUNCTIONS
+//  IMU FUNCTIONS
 // ============================================================
-
 float getRawYaw() {
   if (bno.wasReset()) bno.enableReport(SH2_GAME_ROTATION_VECTOR, 10000);
   while (true) {
@@ -312,20 +370,15 @@ void executeTurn(float targetAngle) {
         prevErr = error;
         stableCount++;
 
-        // float dist = getDistanceCm();
         Serial.print("Stable "); Serial.print(stableCount);
         Serial.print("/"); Serial.print(TRN_STABLE_COUNT);
         Serial.print(" | H:"); Serial.print(heading, 1);
-        Serial.print(" E:"); Serial.print(error, 1);
-        // Serial.print(" | Dist:");
-        // if (dist >= 0) { Serial.print(dist, 1); Serial.println("cm"); }
-        // else             Serial.println("OOR");
+        Serial.print(" E:"); Serial.println(error, 1);
 
-        if (stableCount >= TRN_STABLE_COUNT) {
+        // if (stableCount >= TRN_STABLE_COUNT) {
           Serial.print("Turn done. H:"); Serial.print(heading, 1); Serial.println("deg");
           return;
-        }
-
+        // }
       } else {
         stableCount = 0;
         runTurnPID(targetAngle, prevErr, integ);
@@ -341,16 +394,12 @@ void runForwardPID(float targetHeading, float &prevErr, float &integ) {
   float heading = getHeading();
   float error   = shortestError(targetHeading, heading);
   float dt      = FWD_INTERVAL / 1000.0;
-  float dist    = getDistanceCm();
 
   if (abs(error) <= FWD_DEADBAND) {
     integ   = 0.0;
     prevErr = error;
     driveMotors(FWD_BASE_SPEED, FWD_BASE_SPEED);
-    Serial.print("FWD STRAIGHT | H:"); Serial.print(heading, 1);
-    Serial.print(" | Dist:");
-    if (dist >= 0) { Serial.print(dist, 1); Serial.println("cm"); }
-    else             Serial.println("OOR");
+    Serial.print("FWD STRAIGHT | H:"); Serial.println(heading, 1);
     return;
   }
 
@@ -372,10 +421,7 @@ void runForwardPID(float targetHeading, float &prevErr, float &integ) {
   Serial.print(" E:"); Serial.print(error, 1);
   Serial.print(" Corr:"); Serial.print(correction, 1);
   Serial.print(" L:"); Serial.print(leftSpeed);
-  Serial.print(" R:"); Serial.print(rightSpeed);
-  Serial.print(" | Dist:");
-  if (dist >= 0) { Serial.print(dist, 1); Serial.println("cm"); }
-  else             Serial.println("OOR");
+  Serial.print(" R:"); Serial.println(rightSpeed);
 }
 
 // ============================================================
@@ -385,9 +431,6 @@ void runTurnPID(float targetAngle, float &prevErr, float &integ) {
   float heading = getHeading();
   float error   = shortestError(targetAngle, heading);
   float dt      = TRN_INTERVAL / 1000.0;
-
-  // REMOVE this line entirely from runTurnPID:
-  // float dist = getDistanceCm();   ← DELETE
 
   integ += error * dt;
   integ  = constrain(integ, -100, 100);
@@ -403,7 +446,6 @@ void runTurnPID(float targetAngle, float &prevErr, float &integ) {
   if (error > 0) turnClockwise(speed);
   else           turnAntiClockwise(speed);
 
-  // Also remove dist from serial print:
   Serial.print("TRN | H:"); Serial.print(heading, 1);
   Serial.print(" Target:"); Serial.print(targetAngle, 1);
   Serial.print(" E:"); Serial.print(error, 1);

@@ -29,9 +29,9 @@ float Kd = 0.8;
 
 // -------- PID Config --------
 const float DEADBAND       = 2.0;   // degrees — no motor output inside this
-const int   MIN_SPEED      = 60;    // min PWM when error > deadband
-const int   MAX_SPEED      = 180;   // max PWM
-const int   PID_INTERVAL   = 20;    // ms
+const int   MIN_SPEED      = 80;    // min PWM when error > deadband
+const int   MAX_SPEED      = 255;   // max PWM
+const int   PID_INTERVAL   = 10;    // ms
 
 // -------- IMU --------
 Adafruit_BNO08x   bno(BNO08X_RST);

@@ -1,19 +1,24 @@
 // ============================================================
-//  Rectangle Trajectory + Intake + Shooter Servo + VL53L0X
+//  Rectangle Trajectory + Intake + Shooter Servo
 //  BNO085 + MDD 3A + ESP32-S3
-//
-//  IMU   : Wire  (SDA=18, SCL=17)
-//  VL53L0X: Wire1 (SDA=13, SCL=14)
-//  Distance printed in cm alongside every serial print
+//  + WiFi Serial Monitor (WebSocket)
 // ============================================================
 
 #include <Wire.h>
 #include <Adafruit_BNO08x.h>
-#include <Adafruit_VL53L0X.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
 
-int pause_ms = 150;
+// -------- WiFi Credentials --------
+const char* WIFI_SSID = "TIS_5G";
+const char* WIFI_PASS = "Wecanwewill";
 
-int long_pause = 800;
+AsyncWebServer server(80);
+AsyncWebSocket  ws("/ws");
+
+int pause_ms    = 150;
+int long_pause  = 750;
 int breadth_pause = 300;
 
 // -------- Drive Motor Pins --------
@@ -22,21 +27,17 @@ const int M1B = 7;
 const int M2A = 15;
 const int M2B = 16;
 
-// -------- IMU Pins (Wire — Bus 0) --------
+// -------- IMU Pins --------
 #define BNO08X_SDA 18
 #define BNO08X_SCL 17
 #define BNO08X_RST 12
-
-// -------- VL53L0X Pins (Wire1 — Bus 1) --------
-#define TOF_SDA 13
-#define TOF_SCL 14
 
 // -------- Intake Motor Pins --------
 const int INTAKE_IN1   = 10;
 const int INTAKE_IN2   = 9;
 const int INTAKE_SPEED = 255;
 
-// -------- Servo (14-bit LEDC) --------
+// -------- Servo --------
 #define SERVO_PIN 4
 constexpr uint32_t SERVO_PWM_FREQ = 50;
 constexpr uint8_t  SERVO_PWM_RES  = 14;
@@ -63,25 +64,23 @@ const int   FWD_INTERVAL    = 20;
 const float TRN_KP           = 2.95;
 const float TRN_KI           = 0.0;
 const float TRN_KD           = 0.8;
-const int   TRN_MIN_SPEED    = 60; //60
+const int   TRN_MIN_SPEED    = 60;
 const int   TRN_MAX_SPEED    = 255;
-const float TRN_DEADBAND     = 2.0; //2.0
-const int   TRN_INTERVAL     = 20; //20
-const int   TRN_STABLE_COUNT = 8; //8
+const float TRN_DEADBAND     = 2.0;
+const int   TRN_INTERVAL     = 20;
+const int   TRN_STABLE_COUNT = 8;
 
 // -------- IMU --------
 Adafruit_BNO08x   bno(BNO08X_RST);
 sh2_SensorValue_t imuData;
 float yawOffset = 0.0;
 
-// -------- VL53L0X --------
-Adafruit_VL53L0X lox;
-
 // -------- Function Prototypes --------
+void     initWiFi();
+void     wsPrint(const String& msg);
+void     wsPrintln(const String& msg);
 void     initIMU();
 void     zeroIMU();
-void     initTOF();
-float    getDistanceCm();
 float    getRawYaw();
 float    getHeading();
 float    shortestError(float target, float current);
@@ -95,7 +94,7 @@ void     turnClockwise(int speed);
 void     turnAntiClockwise(int speed);
 void     motorsStop();
 void     setMotorPins();
-void     waitMs(int ms);
+void     pause(int ms);
 void     initIntake();
 void     intakeOn();
 void     intakeOff();
@@ -104,9 +103,94 @@ void     servoWrite(int angle);
 void     servoShoot();
 
 // ============================================================
+//  WIFI + WEBSOCKET
+// ============================================================
+
+void wsPrint(const String& msg) {
+  Serial.print(msg);
+  ws.textAll(msg);
+}
+
+void wsPrintln(const String& msg) {
+  Serial.println(msg);
+  ws.textAll(msg + "\n");
+}
+
+void initWiFi() {
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+  Serial.print("Connected! Open this in your browser: http://");
+  Serial.println(WiFi.localIP());
+
+  // Serve browser terminal
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
+    req->send(200, "text/html", R"rawhtml(
+<!DOCTYPE html><html><head>
+<title>Robot Serial Monitor</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #111; color: #0f0; font-family: monospace; display: flex; flex-direction: column; height: 100vh; }
+  #toolbar { background: #1a1a1a; padding: 8px 12px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #333; }
+  #status  { font-size: 12px; color: #888; }
+  #status.on { color: #0f0; }
+  button   { background: #333; color: #ccc; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-family: monospace; font-size: 12px; }
+  button:hover { background: #444; }
+  #log     { flex: 1; overflow-y: auto; padding: 10px 12px; white-space: pre-wrap; font-size: 13px; line-height: 1.5; }
+</style></head><body>
+<div id="toolbar">
+  <span style="color:#0f0;font-weight:bold">Robot Monitor</span>
+  <span id="status">● disconnected</span>
+  <button onclick="clearLog()">Clear</button>
+  <button onclick="copyLog()">Copy</button>
+</div>
+<div id="log"></div>
+<script>
+  const log = document.getElementById('log');
+  const status = document.getElementById('status');
+  const ws = new WebSocket('ws://' + location.host + '/ws');
+
+  ws.onopen = () => {
+    status.textContent = '● connected';
+    status.className = 'on';
+    append('[connected to robot]\n');
+  };
+  ws.onclose = () => {
+    status.textContent = '● disconnected';
+    status.className = '';
+    append('[disconnected]\n');
+  };
+  ws.onmessage = e => append(e.data);
+
+  function append(text) {
+    log.textContent += text;
+    log.scrollTop = log.scrollHeight;
+  }
+  function clearLog() { log.textContent = ''; }
+  function copyLog()  { navigator.clipboard.writeText(log.textContent); }
+</script></body></html>
+)rawhtml");
+  });
+
+  ws.onEvent([](AsyncWebSocket*, AsyncWebSocketClient*, AwsEventType,
+                void*, uint8_t*, size_t) {});
+  server.addHandler(&ws);
+  server.begin();
+  Serial.println("Web server started.");
+}
+
+// ============================================================
+//  SETUP
+// ============================================================
 void setup() {
   Serial.begin(115200);
-  while (!Serial) delay(10);
+  // while (!Serial) delay(10);
+
+  initWiFi();       // ← WiFi first so IP prints over USB
 
   setMotorPins();
   motorsStop();
@@ -117,93 +201,63 @@ void setup() {
   initIMU();
   zeroIMU();
 
-  initTOF();
-
-  Serial.println("Ready. Starting in 2 seconds...");
+  wsPrintln("Ready. Starting in 2 seconds...");
   delay(2000);
 }
 
+// ============================================================
+//  LOOP
 // ============================================================
 void loop() {
   zeroIMU();
 
   intakeOn();
-  Serial.println("Intake ON");
+  wsPrintln("Intake ON");
 
   servoWrite(SERVO_INTAKE_POS);
-  Serial.println("Servo at 90deg");
+  wsPrintln("Servo at 90deg");
 
-  // ============================================================
-  //  RECTANGLE SEQUENCE
-  // ============================================================
-
-  Serial.println("=== SIDE 1: Forward 750ms @ 0deg ===");
+  wsPrintln("=== SIDE 1: Forward @ 0deg ===");
   executeDrive(long_pause, 0.0);
-  waitMs(pause_ms);
+  pause(pause_ms);
 
-  Serial.println("=== SHOOTER: 135deg → 250ms → 90deg ===");
+  wsPrintln("=== SHOOTER: 135deg → 90deg ===");
   servoShoot();
-  waitMs(pause_ms);
+  pause(pause_ms);
 
-  Serial.println("=== TURN 1: To 90deg ===");
+  wsPrintln("=== TURN 1: To 90deg ===");
   executeTurn(90.0);
-  waitMs(pause_ms);
+  pause(pause_ms);
 
-  Serial.println("=== SIDE 2: Forward 350ms @ 90deg ===");
+  wsPrintln("=== SIDE 2: Forward @ 90deg ===");
   executeDrive(breadth_pause, 90.0);
-  waitMs(pause_ms);
+  pause(pause_ms);
 
-  Serial.println("=== TURN 2: To 180deg ===");
+  wsPrintln("=== TURN 2: To 180deg ===");
   executeTurn(180.0);
-  waitMs(pause_ms);
+  pause(pause_ms);
 
-  Serial.println("=== SIDE 3: Forward 750ms @ 180deg ===");
+  wsPrintln("=== SIDE 3: Forward @ 180deg ===");
   executeDrive(long_pause, 180.0);
-  waitMs(pause_ms);
+  pause(pause_ms);
 
-  Serial.println("=== TURN 3: To -90deg ===");
+  wsPrintln("=== TURN 3: To -90deg ===");
   executeTurn(-90.0);
-  waitMs(pause_ms);
+  pause(pause_ms);
 
-  Serial.println("=== SIDE 4: Forward 350ms @ -90deg ===");
+  wsPrintln("=== SIDE 4: Forward @ -90deg ===");
   executeDrive(breadth_pause, -90.0);
-  waitMs(pause_ms);
+  pause(pause_ms);
 
-  Serial.println("=== TURN 4: Back to 0deg ===");
+  wsPrintln("=== TURN 4: Back to 0deg ===");
   executeTurn(0.0);
-  waitMs(pause_ms);
+  pause(pause_ms);
 
-  Serial.println("=== RECTANGLE COMPLETE — RESTARTING ===");
+  wsPrintln("=== RECTANGLE COMPLETE — RESTARTING ===");
 }
 
 // ============================================================
-//  initTOF()
-//  Initializes VL53L0X on Wire1 (Bus 1)
-// ============================================================
-void initTOF() {
-  Wire1.begin(TOF_SDA, TOF_SCL);
-  if (!lox.begin(0x29, false, &Wire1)) {
-    Serial.println("VL53L0X not found! Check wiring.");
-    while (1) delay(10);
-  }
-  Serial.println("VL53L0X Ready.");
-}
-
-// ============================================================
-//  getDistanceCm()
-//  Returns distance in cm. Returns -1 if out of range.
-// ============================================================
-float getDistanceCm() {
-  VL53L0X_RangingMeasurementData_t measure;
-  lox.rangingTest(&measure, false);
-  if (measure.RangeStatus != 4) {
-    return measure.RangeMilliMeter / 10.0;
-  }
-  return -1.0;  // out of range
-}
-
-// ============================================================
-//  SERVO FUNCTIONS
+//  SERVO
 // ============================================================
 void servoWrite(int angle) {
   angle = constrain(angle, 0, 180);
@@ -215,20 +269,20 @@ void initServo() {
   ledcAttach(SERVO_PIN, SERVO_PWM_FREQ, SERVO_PWM_RES);
   servoWrite(SERVO_INTAKE_POS);
   delay(500);
-  Serial.println("Servo ready at 90deg.");
+  wsPrintln("Servo ready at 90deg.");
 }
 
 void servoShoot() {
-  Serial.println("Servo: 90 → 135deg");
+  wsPrintln("Servo: 90 → 135deg");
   servoWrite(SERVO_SHOOT_POS);
   delay(250);
-  Serial.println("Servo: 135 → 90deg");
+  wsPrintln("Servo: 135 → 90deg");
   servoWrite(SERVO_INTAKE_POS);
   delay(250);
 }
 
 // ============================================================
-//  INTAKE FUNCTIONS
+//  INTAKE
 // ============================================================
 void initIntake() {
   pinMode(INTAKE_IN1, OUTPUT);
@@ -248,8 +302,29 @@ void intakeOff() {
 }
 
 // ============================================================
-//  ALL RECTANGLE FUNCTIONS
+//  IMU
 // ============================================================
+void initIMU() {
+  Wire.begin(BNO08X_SDA, BNO08X_SCL);
+  if (!bno.begin_I2C(0x4A, &Wire)) {
+    wsPrintln("BNO085 not found!");
+    while (1) delay(10);
+  }
+  bno.enableReport(SH2_GAME_ROTATION_VECTOR, 10000);
+  delay(200);
+  wsPrintln("BNO085 Ready.");
+}
+
+void zeroIMU() {
+  for (int i = 0; i < 20; i++) {
+    bno.getSensorEvent(&imuData);
+    delay(10);
+  }
+  yawOffset = getRawYaw();
+  wsPrint("IMU Zeroed at: ");
+  wsPrint(String(yawOffset, 2));
+  wsPrintln("deg");
+}
 
 float getRawYaw() {
   if (bno.wasReset()) bno.enableReport(SH2_GAME_ROTATION_VECTOR, 10000);
@@ -276,25 +351,31 @@ float shortestError(float targetDeg, float currentDeg) {
   return wrapAngle(error);
 }
 
-void executeDrive(unsigned long durationMs, float targetHeading) {
-  float prevErr = 0.0;
-  float integ   = 0.0;
-  unsigned long startTime   = millis();
-  unsigned long lastPIDTime = millis();
+float wrapAngle(float a) {
+  while (a >  180.0) a -= 360.0;
+  while (a < -180.0) a += 360.0;
+  return a;
+}
 
+// ============================================================
+//  DRIVE
+// ============================================================
+void executeDrive(unsigned long durationMs, float targetHeading) {
+  float prevErr = 0.0, integ = 0.0;
+  unsigned long startTime = millis(), lastPIDTime = millis();
   while (millis() - startTime < durationMs) {
     unsigned long now = millis();
     if (now - lastPIDTime >= FWD_INTERVAL) {
       lastPIDTime = now;
       runForwardPID(targetHeading, prevErr, integ);
+      ws.cleanupClients();   // prevent stale socket buildup
     }
   }
   motorsStop();
 }
 
 void executeTurn(float targetAngle) {
-  float prevErr     = 0.0;
-  float integ       = 0.0;
+  float prevErr = 0.0, integ = 0.0;
   int   stableCount = 0;
   unsigned long lastPIDTime = millis();
 
@@ -302,30 +383,25 @@ void executeTurn(float targetAngle) {
     unsigned long now = millis();
     if (now - lastPIDTime >= TRN_INTERVAL) {
       lastPIDTime = now;
+      ws.cleanupClients();   // prevent stale socket buildup
 
       float heading = getHeading();
       float error   = shortestError(targetAngle, heading);
 
       if (abs(error) <= TRN_DEADBAND) {
         motorsStop();
-        integ   = 0.0;
-        prevErr = error;
+        integ = 0.0; prevErr = error;
         stableCount++;
 
-        // float dist = getDistanceCm();
-        Serial.print("Stable "); Serial.print(stableCount);
-        Serial.print("/"); Serial.print(TRN_STABLE_COUNT);
-        Serial.print(" | H:"); Serial.print(heading, 1);
-        Serial.print(" E:"); Serial.print(error, 1);
-        // Serial.print(" | Dist:");
-        // if (dist >= 0) { Serial.print(dist, 1); Serial.println("cm"); }
-        // else             Serial.println("OOR");
+        wsPrint("Stable " + String(stableCount) + "/" + String(TRN_STABLE_COUNT));
+        wsPrint(" | H:" + String(heading, 1));
+        wsPrint(" Target:" + String(targetAngle, 1));
+        wsPrintln(" E:" + String(error, 1));
 
         if (stableCount >= TRN_STABLE_COUNT) {
-          Serial.print("Turn done. H:"); Serial.print(heading, 1); Serial.println("deg");
+          wsPrintln("Turn done. Heading: " + String(heading, 1) + "deg");
           return;
         }
-
       } else {
         stableCount = 0;
         runTurnPID(targetAngle, prevErr, integ);
@@ -334,29 +410,20 @@ void executeTurn(float targetAngle) {
   }
 }
 
-// ============================================================
-//  runForwardPID()
-// ============================================================
 void runForwardPID(float targetHeading, float &prevErr, float &integ) {
   float heading = getHeading();
   float error   = shortestError(targetHeading, heading);
   float dt      = FWD_INTERVAL / 1000.0;
-  float dist    = getDistanceCm();
 
   if (abs(error) <= FWD_DEADBAND) {
-    integ   = 0.0;
-    prevErr = error;
+    integ = 0.0; prevErr = error;
     driveMotors(FWD_BASE_SPEED, FWD_BASE_SPEED);
-    Serial.print("FWD STRAIGHT | H:"); Serial.print(heading, 1);
-    Serial.print(" | Dist:");
-    if (dist >= 0) { Serial.print(dist, 1); Serial.println("cm"); }
-    else             Serial.println("OOR");
+    wsPrintln("FWD STRAIGHT | H:" + String(heading, 1) + "deg");
     return;
   }
 
   integ += error * dt;
   integ  = constrain(integ, -50, 50);
-
   float derivative = (error - prevErr) / dt;
   prevErr = error;
 
@@ -368,75 +435,46 @@ void runForwardPID(float targetHeading, float &prevErr, float &integ) {
 
   driveMotors(leftSpeed, rightSpeed);
 
-  Serial.print("FWD | H:"); Serial.print(heading, 1);
-  Serial.print(" E:"); Serial.print(error, 1);
-  Serial.print(" Corr:"); Serial.print(correction, 1);
-  Serial.print(" L:"); Serial.print(leftSpeed);
-  Serial.print(" R:"); Serial.print(rightSpeed);
-  Serial.print(" | Dist:");
-  if (dist >= 0) { Serial.print(dist, 1); Serial.println("cm"); }
-  else             Serial.println("OOR");
+  wsPrint("FWD | H:" + String(heading, 1));
+  wsPrint(" E:" + String(error, 1));
+  wsPrint(" Corr:" + String(correction, 1));
+  wsPrint(" L:" + String(leftSpeed));
+  wsPrintln(" R:" + String(rightSpeed));
 }
 
-// ============================================================
-//  runTurnPID()
-// ============================================================
 void runTurnPID(float targetAngle, float &prevErr, float &integ) {
   float heading = getHeading();
   float error   = shortestError(targetAngle, heading);
   float dt      = TRN_INTERVAL / 1000.0;
 
-  // REMOVE this line entirely from runTurnPID:
-  // float dist = getDistanceCm();   ← DELETE
-
   integ += error * dt;
   integ  = constrain(integ, -100, 100);
-
   float derivative = (error - prevErr) / dt;
   prevErr = error;
 
   float output = (TRN_KP * error) + (TRN_KI * integ) + (TRN_KD * derivative);
-
-  int speed = (int)abs(output);
-  speed = constrain(speed, TRN_MIN_SPEED, TRN_MAX_SPEED);
+  int speed = constrain((int)abs(output), TRN_MIN_SPEED, TRN_MAX_SPEED);
 
   if (error > 0) turnClockwise(speed);
   else           turnAntiClockwise(speed);
 
-  // Also remove dist from serial print:
-  Serial.print("TRN | H:"); Serial.print(heading, 1);
-  Serial.print(" Target:"); Serial.print(targetAngle, 1);
-  Serial.print(" E:"); Serial.print(error, 1);
-  Serial.print(" Spd:"); Serial.println(speed);
+  wsPrint("TRN | H:" + String(heading, 1));
+  wsPrint(" Target:" + String(targetAngle, 1));
+  wsPrint(" E:" + String(error, 1));
+  wsPrintln(" Spd:" + String(speed));
 }
 
 // ============================================================
-float wrapAngle(float a) {
-  while (a >  180.0) a -= 360.0;
-  while (a < -180.0) a += 360.0;
-  return a;
-}
-
-void waitMs(int ms) {
-  motorsStop();
-  delay(ms);
-}
-
+//  MOTOR HELPERS
+// ============================================================
 void driveMotors(int leftSpeed, int rightSpeed) {
-  if (leftSpeed > 0) {
-    analogWrite(M1A, 0);          analogWrite(M1B, leftSpeed);
-  } else if (leftSpeed < 0) {
-    analogWrite(M1A, -leftSpeed); analogWrite(M1B, 0);
-  } else {
-    analogWrite(M1A, 0);          analogWrite(M1B, 0);
-  }
-  if (rightSpeed > 0) {
-    analogWrite(M2A, rightSpeed); analogWrite(M2B, 0);
-  } else if (rightSpeed < 0) {
-    analogWrite(M2A, 0);          analogWrite(M2B, -rightSpeed);
-  } else {
-    analogWrite(M2A, 0);          analogWrite(M2B, 0);
-  }
+  if      (leftSpeed > 0) { analogWrite(M1A, 0);          analogWrite(M1B, leftSpeed);  }
+  else if (leftSpeed < 0) { analogWrite(M1A, -leftSpeed); analogWrite(M1B, 0);           }
+  else                    { analogWrite(M1A, 0);          analogWrite(M1B, 0);           }
+
+  if      (rightSpeed > 0) { analogWrite(M2A, rightSpeed); analogWrite(M2B, 0);           }
+  else if (rightSpeed < 0) { analogWrite(M2A, 0);          analogWrite(M2B, -rightSpeed); }
+  else                     { analogWrite(M2A, 0);          analogWrite(M2B, 0);           }
 }
 
 void turnClockwise(int speed) {
@@ -459,24 +497,7 @@ void setMotorPins() {
   pinMode(M2A, OUTPUT); pinMode(M2B, OUTPUT);
 }
 
-void initIMU() {
-  Wire.begin(BNO08X_SDA, BNO08X_SCL);
-  if (!bno.begin_I2C(0x4A, &Wire)) {
-    Serial.println("BNO085 not found!");
-    while (1) delay(10);
-  }
-  bno.enableReport(SH2_GAME_ROTATION_VECTOR, 10000);
-  delay(200);
-  Serial.println("BNO085 Ready.");
-}
-
-void zeroIMU() {
-  for (int i = 0; i < 20; i++) {
-    bno.getSensorEvent(&imuData);
-    delay(10);
-  }
-  yawOffset = getRawYaw();
-  Serial.print("IMU Zeroed at: ");
-  Serial.print(yawOffset, 2);
-  Serial.println("deg");
+void pause(int ms) {
+  motorsStop();
+  delay(ms);
 }
