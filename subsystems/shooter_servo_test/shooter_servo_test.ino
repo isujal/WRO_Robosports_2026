@@ -16,13 +16,13 @@ void setup() {
   myServo.setPeriodHertz(50);
   myServo.attach(SERVO_PIN, 500, 2400);
 
-      myServo.write(135);
+      myServo.write(225);
 
 
       delay(2000);
 
 
-      myServo.write(90);
+      myServo.write(225);
 
 
 

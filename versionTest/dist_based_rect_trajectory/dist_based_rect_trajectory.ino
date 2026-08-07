@@ -8,8 +8,8 @@
 #include <Adafruit_BNO08x.h>
 #include <Adafruit_VL53L0X.h>
 
-int pause_ms = 150;
-int breadth_pause = 450;
+int pause_ms = 50;
+int breadth_pause = 500;
 int reset_pause = 400;
 
 const float STOP_DISTANCE_CM = 12.0;  // Stop threshold on long sides
@@ -50,7 +50,7 @@ const int SERVO_SHOOT_POS  = 135;
 const float FWD_KP          = 2.6;
 const float FWD_KI          = 0.0;
 const float FWD_KD          = 0.5;
-const int   FWD_BASE_SPEED  = 180;   // Slowed down so TOF has time to react
+const int   FWD_BASE_SPEED  = 220;   // Slowed down so TOF has time to react
 const int   FWD_MAX_CORRECT = 60;
 const float FWD_DEADBAND    = 1.5;
 const int   FWD_INTERVAL    = 20;
@@ -63,7 +63,7 @@ const float TRN_KI           = 0.0;
 const float TRN_KD           = 0.8;
 const int   TRN_MIN_SPEED    = 60;
 const int   TRN_MAX_SPEED    = 255;
-const float TRN_DEADBAND     = 10.0;
+const float TRN_DEADBAND     = 8.0;
 const int   TRN_INTERVAL     = 20;
 const int   TRN_STABLE_COUNT = 8;
 
@@ -85,7 +85,7 @@ float    getHeading();
 float    shortestError(float target, float current);
 float    wrapAngle(float a);
 void     executeDrive(unsigned long durationMs, float targetHeading);
-void     executeDriveUntilClose(float targetHeading, float stopDistCm);  // NEW
+void     executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMidway = false);
 void     executeTurn(float targetAngle);
 void     runForwardPID(float targetHeading, float &prevErr, float &integ);
 void     driveMotors(int leftSpeed, int rightSpeed);
@@ -141,12 +141,13 @@ void loop() {
 
   // SIDE 1: Drive until wall is <12cm (distance-triggered stop)
   Serial.println("=== SIDE 1: Forward until <12cm @ 0deg ===");
-  executeDriveUntilClose(0.0, STOP_DISTANCE_CM);
+    executeDriveUntilClose(0.0, STOP_DISTANCE_CM, true);
+
   waitMs(pause_ms);
 
-  Serial.println("=== SHOOTER: 135deg → 250ms → 90deg ===");
-  servoShoot();
-  waitMs(pause_ms);
+  // Serial.println("=== SHOOTER: 135deg → 250ms → 90deg ===");
+  // servoShoot();
+  // waitMs(pause_ms);
 
   Serial.println("=== TURN 1: To 90deg ===");
   executeTurn(45.0);
@@ -163,7 +164,7 @@ void loop() {
 
   // SIDE 3: Drive until wall is <12cm (distance-triggered stop)
   Serial.println("=== SIDE 3: Forward until <12cm @ 180deg ===");
-  executeDriveUntilClose(180.0, STOP_DISTANCE_CM);
+  executeDriveUntilClose(180.0, STOP_DISTANCE_CM, false);
   waitMs(pause_ms);
 
   Serial.println("=== TURN 3: To -90deg ===");
@@ -191,36 +192,66 @@ void loop() {
 //  Drives forward with heading PID until TOF reads < stopDistCm.
 //  Falls back to a max timeout (5 seconds) as a safety net.
 // ============================================================
-void executeDriveUntilClose(float targetHeading, float stopDistCm) {
+
+void executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMidway) {
   float prevErr = 0.0;
   float integ   = 0.0;
-  unsigned long lastPIDTime = millis();
-  unsigned long startTime   = millis();
-  const unsigned long MAX_TIMEOUT = 2000;  // 5s safety fallback
+  unsigned long lastPIDTime  = millis();
+  unsigned long startTime    = millis();
+  const unsigned long MAX_TIMEOUT = 2000;
+
+  // ── Non-blocking shoot state ────────────────────────────
+  bool shootDone      = false;
+  bool shootTriggered = false;
+  unsigned long shootStartTime = 0;
+  // Phase 0 = not started, 1 = moving to SHOOT_POS, 2 = moving back to INTAKE_POS
+  int shootPhase = 0;
+  // ────────────────────────────────────────────────────────
 
   while (true) {
-    // Safety timeout — never run forever
-    if (millis() - startTime > MAX_TIMEOUT) {
+    unsigned long now = millis();
+
+    if (now - startTime > MAX_TIMEOUT) {
       Serial.println("TOF drive: MAX TIMEOUT reached, stopping.");
       break;
     }
 
-    unsigned long now = millis();
+    // ── Non-blocking servo shoot state machine ───────────
+    if (shootMidway && !shootDone) {
+
+      // Trigger: 500ms into drive
+      if (!shootTriggered && (now - startTime >= 600)) {
+        Serial.println("Mid-drive SHOOT triggered");
+        servoWrite(SERVO_SHOOT_POS);   // command servo, no delay
+        shootTriggered = true;
+        shootStartTime = now;
+        shootPhase = 1;
+      }
+
+      // Phase 1 → 2: servo has had 250ms to reach SHOOT_POS, now return
+      if (shootPhase == 1 && (now - shootStartTime >= 250)) {
+        servoWrite(SERVO_INTAKE_POS);
+        shootPhase = 2;
+      }
+
+      // Phase 2 → done: servo has had 250ms to return to INTAKE_POS
+      if (shootPhase == 2 && (now - shootStartTime >= 500)) {
+        shootDone = true;
+        Serial.println("Mid-drive SHOOT complete");
+      }
+    }
+    // ────────────────────────────────────────────────────────
+
+    // ── PID runs every FWD_INTERVAL ms, uninterrupted ────
     if (now - lastPIDTime >= FWD_INTERVAL) {
       lastPIDTime = now;
 
-      // Check distance FIRST before moving
       float dist = getDistanceCm();
 
       Serial.print("TOF Drive | Dist:");
-      if (dist >= 0) {
-        Serial.print(dist, 1);
-        Serial.print("cm");
-      } else {
-        Serial.print("OOR");
-      }
+      if (dist >= 0) { Serial.print(dist, 1); Serial.print("cm"); }
+      else             Serial.print("OOR");
 
-      // Stop condition: valid reading AND below threshold
       if (dist > 0 && dist < stopDistCm) {
         Serial.println(" → STOP (wall detected)");
         motorsStop();
@@ -228,14 +259,62 @@ void executeDriveUntilClose(float targetHeading, float stopDistCm) {
       }
 
       Serial.println();
-
-      // Drive straight with heading PID
       runForwardPID(targetHeading, prevErr, integ);
     }
   }
 
   motorsStop();
 }
+
+
+
+
+
+// void executeDriveUntilClose(float targetHeading, float stopDistCm) {
+//   float prevErr = 0.0;
+//   float integ   = 0.0;
+//   unsigned long lastPIDTime = millis();
+//   unsigned long startTime   = millis();
+//   const unsigned long MAX_TIMEOUT = 2000;  // 5s safety fallback
+
+//   while (true) {
+//     // Safety timeout — never run forever
+//     if (millis() - startTime > MAX_TIMEOUT) {
+//       Serial.println("TOF drive: MAX TIMEOUT reached, stopping.");
+//       break;
+//     }
+
+//     unsigned long now = millis();
+//     if (now - lastPIDTime >= FWD_INTERVAL) {
+//       lastPIDTime = now;
+
+//       // Check distance FIRST before moving
+//       float dist = getDistanceCm();
+
+//       Serial.print("TOF Drive | Dist:");
+//       if (dist >= 0) {
+//         Serial.print(dist, 1);
+//         Serial.print("cm");
+//       } else {
+//         Serial.print("OOR");
+//       }
+
+//       // Stop condition: valid reading AND below threshold
+//       if (dist > 0 && dist < stopDistCm) {
+//         Serial.println(" → STOP (wall detected)");
+//         motorsStop();
+//         break;
+//       }
+
+//       Serial.println();
+
+//       // Drive straight with heading PID
+//       runForwardPID(targetHeading, prevErr, integ);
+//     }
+//   }
+
+//   motorsStop();
+// }
 
 // ============================================================
 //  initTOF()
