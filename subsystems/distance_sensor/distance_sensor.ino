@@ -21,8 +21,8 @@
 #define BNO08X_RST 12
 
 // -------- VL53L0X I2C (Bus 1) --------
-#define TOF_SDA 13
-#define TOF_SCL 14
+#define TOF_SDA 46
+#define TOF_SCL 9
 
 // -------- Objects --------
 Adafruit_BNO08x   bno(BNO08X_RST);

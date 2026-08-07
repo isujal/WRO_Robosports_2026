@@ -15,14 +15,14 @@ void setup() {
 
   myServo.setPeriodHertz(50);
   myServo.attach(SERVO_PIN, 500, 2400);
-
-      myServo.write(225);
+// intyake 0...... shooting 50 ....... storing 145
+      myServo.write(145);
 
 
       delay(2000);
 
 
-      myServo.write(225);
+      // myServo.write(0);
 
 
 

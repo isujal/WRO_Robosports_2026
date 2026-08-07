@@ -27,8 +27,8 @@ const int M2B = 16;
 #define BNO08X_RST 12
 
 // -------- Intake Motor Pins --------
-const int INTAKE_IN1   = 10;
-const int INTAKE_IN2   = 9;
+const int INTAKE_IN1   = 3;
+const int INTAKE_IN2   = 8;
 const int INTAKE_SPEED = 255;   // 0–255
 
 // -------- Servo (proven from PS5 bot — 14-bit LEDC) --------

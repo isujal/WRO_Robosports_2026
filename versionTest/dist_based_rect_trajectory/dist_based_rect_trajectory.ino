@@ -26,12 +26,12 @@ const int M2B = 16;
 #define BNO08X_RST 12
 
 // -------- VL53L0X Pins (Wire1 — Bus 1) --------
-#define TOF_SDA 13
-#define TOF_SCL 14
+#define TOF_SDA 46
+#define TOF_SCL 9
 
 // -------- Intake Motor Pins --------
-const int INTAKE_IN1   = 10;
-const int INTAKE_IN2   = 9;
+const int INTAKE_IN1   = 3;
+const int INTAKE_IN2   = 8;
 const int INTAKE_SPEED = 255;
 
 // -------- Servo (14-bit LEDC) --------
@@ -41,8 +41,8 @@ constexpr uint8_t  SERVO_PWM_RES  = 14;
 constexpr uint16_t SERVO_MIN_DUTY = (uint16_t)((500  * 16384L) / 20000);
 constexpr uint16_t SERVO_MAX_DUTY = (uint16_t)((2400 * 16384L) / 20000);
 
-const int SERVO_INTAKE_POS = 90;
-const int SERVO_SHOOT_POS  = 135;
+const int SERVO_INTAKE_POS = 0;
+const int SERVO_SHOOT_POS  = 50;
 
 // ============================================================
 //  FORWARD PID CONSTANTS
