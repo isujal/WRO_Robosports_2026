@@ -1,15 +1,16 @@
 // ============================================================
 //  FULL RUN — ESP32-S3 + BNO085 + VL53L0X + Pixy2 + MDD 3A
 //
-//  BOOT FLOW:
+//  FLOW:
 //    1. Init all hardware
-//    2. Sample Pixy2 for PIXY_SAMPLE_MS (1500ms)
-//    3. Pick zone by most-seen cumulative vote:
-//       BOT-LEFT  → runTrajectory1()  then rectangle from Side 1
-//       TOP-LEFT  → runTrajectory2()  then rectangle from Side 1
-//       BOT-RIGHT → runTrajectory3()  then rectangle from Side 3
-//       TOP-RIGHT → runTrajectory4()  then rectangle from Side 3
-//    4. Rectangle loop forever
+//    2. Continuously sample Pixy2 & update zone decision
+//    3. Show zone via built-in RGB LED:
+//         BOT-RIGHT → GREEN
+//         BOT-LEFT  → RED
+//         TOP-RIGHT → ORANGE
+//         TOP-LEFT  → PURPLE
+//         UNKNOWN   → WHITE (slow blink)
+//    4. When toggle switch flipped ON → run trajectory + rectangle
 // ============================================================
 
 #include <Wire.h>
@@ -21,26 +22,26 @@
 //  ★ TUNE THESE ★
 // ============================================================
 
-// --- Trajectory 1 (Bot-Left: Purple → Orange) ---
+// --- Trajectory 1 (Bot-Left) ---
 const unsigned long T1_PHASE1_MS = 400;
 const unsigned long T1_PHASE2_MS = 300;
 const unsigned long T1_PHASE3_MS = 200;
 const unsigned long T1_PAUSE_MS  = 200;
 const int           T1_SPEED     = 180;
 
-// --- Trajectory 2 (Top-Left: Orange → Purple) ---
+// --- Trajectory 2 (Top-Left) ---
 const unsigned long T2_PHASE1_MS = 400;
 const unsigned long T2_PHASE2_MS = 200;
 const int           T2_SPEED     = 180;
 
-// --- Trajectory 3 (Bot-Right: 60° t    urn + T1 logic + realign) ---
+// --- Trajectory 3 (Bot-Right) ---
 const unsigned long T3_PHASE1_MS = 450;
 const unsigned long T3_PHASE2_MS = 300;
 const unsigned long T3_PHASE3_MS = 200;
 const unsigned long T3_PAUSE_MS  = 200;
 const int           T3_SPEED     = 180;
 
-// --- Trajectory 4 (Top-Right: 60° turn + T2 logic + realign) ---
+// --- Trajectory 4 (Top-Right) ---
 const unsigned long T4_PHASE1_MS = 400;
 const unsigned long T4_PHASE2_MS = 200;
 const int           T4_SPEED     = 180;
@@ -58,7 +59,7 @@ int         pause_ms         = 50;
 #define SPLIT_Y           81
 #define DEAD_X            5
 #define DEAD_Y            5
-#define PIXY_SAMPLE_MS    1500
+#define PIXY_SAMPLE_MS    1500   // one full re-sample window
 
 // ============================================================
 //  HARDWARE PINS
@@ -89,6 +90,18 @@ constexpr uint16_t SERVO_MAX_DUTY = (uint16_t)((2400 * 16384L) / 20000);
 const int SERVO_NEUTRAL = 0;
 const int SERVO_SHOOT   = 50;
 const int SERVO_LOAD    = 140;
+
+// --- Toggle switch ---
+#define TOGGLE_PIN 20   // GPIO 5, pull-down to GND, other side to 3.3V
+
+// --- Built-in RGB LED (ESP32-S3 DevKit) ---
+// ESP32-S3-DevKitC uses GPIO 38 for the WS2812 onboard LED
+// If yours is different, change this pin
+#define RGB_LED_PIN 38
+#define RGB_LED_COUNT 1
+
+#include <Adafruit_NeoPixel.h>
+Adafruit_NeoPixel rgbLed(RGB_LED_COUNT, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
 // ============================================================
 //  PID CONSTANTS
@@ -124,6 +137,9 @@ Pixy2SPI_SS       pixy;
 
 enum Zone { UNKNOWN, TOP_LEFT, BOT_LEFT, TOP_RIGHT, BOT_RIGHT };
 
+Zone  lastDecision  = UNKNOWN;      // most recent zone decision
+bool  decisionReady = false;        // true once we have at least one clean sample
+
 // ============================================================
 //  FUNCTION PROTOTYPES
 // ============================================================
@@ -136,9 +152,8 @@ void  runTrajectory2();
 void  runTrajectory3();
 void  runTrajectory4();
 
-void  runRectangleFromSide1();
-void  runRectangleFromSide3();
 void  runRectangleLap();
+void  runRectangleLapFromSide3();
 
 void  executeDrive(unsigned long durationMs, float targetHeading);
 void  executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMidway = false);
@@ -170,11 +185,22 @@ float wrapAngle(float a);
 void  initTOF();
 float getDistanceCm();
 
+void  setLedForZone(Zone z);
+void  setLed(uint8_t r, uint8_t g, uint8_t b);
+
 // ============================================================
 //  SETUP
 // ============================================================
 void setup() {
   Serial.begin(115200);
+
+  // Toggle switch pin
+  pinMode(TOGGLE_PIN, INPUT);   // external pull-down resistor on this pin
+
+  // RGB LED
+  rgbLed.begin();
+  rgbLed.setBrightness(80);
+  setLed(255, 255, 255);        // white = booting
 
   setMotorPins();
   motorsStop();
@@ -188,39 +214,94 @@ void setup() {
   pixy.changeProg("color_connected_components");
   Serial.println("Pixy2 Ready.");
 
-  Serial.println("All hardware ready. Sampling Pixy2...");
+  Serial.println("All hardware ready.");
+  Serial.println("Sampling Pixy2 continuously — flip toggle to run trajectory.");
+
   delay(500);
   zeroIMU();
+
+  // Initial blink: white rapid = ready for detection
+  for (int i = 0; i < 6; i++) {
+    setLed(255, 255, 255);
+    delay(150);
+    setLed(0, 0, 0);
+    delay(150);
+  }
 }
 
 // ============================================================
 //  LOOP
+//  Phase A: Continuously detect zone, update LED
+//  Phase B: Once toggle is ON, run trajectory and lock into rect
 // ============================================================
 void loop() {
 
-  // ── STEP 1: Detect purple ball zone ──────────────────────
-  Zone detectedZone = detectPurpleBall();
+  // ── PHASE A: Detection loop ───────────────────────────────
+  // Keep resampling pixy and showing LED until toggle is flipped
+  while (digitalRead(TOGGLE_PIN) == LOW) {
 
-  // ── STEP 2: Run correct trajectory + correct rect entry ──
-  if (detectedZone == BOT_LEFT) {
+    Serial.println("[STANDBY] Sampling Pixy2...");
+    Zone z = detectPurpleBall();
+
+    if (z != UNKNOWN) {
+      lastDecision  = z;
+      decisionReady = true;
+    }
+
+    // Update LED to reflect current best decision
+    setLedForZone(lastDecision);
+
+    // Print status
+    Serial.print("[STANDBY] Current decision: ");
+    switch (lastDecision) {
+      case BOT_RIGHT: Serial.println("BOT-RIGHT (GREEN)");   break;
+      case BOT_LEFT:  Serial.println("BOT-LEFT  (RED)");     break;
+      case TOP_RIGHT: Serial.println("TOP-RIGHT (ORANGE)");  break;
+      case TOP_LEFT:  Serial.println("TOP-LEFT  (PURPLE)");  break;
+      default:        Serial.println("UNKNOWN   (WHITE)");   break;
+    }
+
+    // Small gap between re-samples so serial isn't flooded
+    // (detectPurpleBall already takes ~1500ms, so this is minimal)
+    delay(100);
+  }
+
+  // ── PHASE B: Toggle flipped ON ────────────────────────────
+  Serial.println(">>> TOGGLE ON — launching trajectory!");
+
+  // If we never got a clean read, do one final sample now
+  if (!decisionReady) {
+    Serial.println("No prior decision — running emergency sample...");
+    lastDecision = detectPurpleBall();
+  }
+
+  // Freeze LED on the decision colour (visual confirmation)
+  setLedForZone(lastDecision);
+  delay(500);   // half-second hold so you can see the colour before motors spin
+
+  // Zero IMU right before run for fresh heading reference
+  zeroIMU();
+
+  // ── Run correct trajectory + rectangle ───────────────────
+  if (lastDecision == BOT_LEFT) {
     Serial.println("DECISION: BOT-LEFT → Trajectory 1 → Rect from Side 1");
     runTrajectory1();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 1) ===");
     while (true) { runRectangleLap(); }
 
-  } else if (detectedZone == TOP_LEFT) {
+  } else if (lastDecision == TOP_LEFT) {
     Serial.println("DECISION: TOP-LEFT → Trajectory 2 → Rect from Side 1");
     runTrajectory2();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 1) ===");
     while (true) { runRectangleLap(); }
 
-  } else if (detectedZone == BOT_RIGHT) {
+  } else if (lastDecision == BOT_RIGHT) {
     Serial.println("DECISION: BOT-RIGHT → Trajectory 3 → Rect from Side 3");
     runTrajectory3();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 3) ===");
     while (true) { runRectangleLapFromSide3(); }
 
-  } else if (detectedZone == TOP_RIGHT) {
+  } else if (lastDecision == TOP_RIGHT) {
     Serial.println("DECISION: TOP-RIGHT → Trajectory 4 → Rect from Side 3");
     runTrajectory4();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 3) ===");
@@ -235,9 +316,26 @@ void loop() {
 }
 
 // ============================================================
+//  LED HELPERS
+// ============================================================
+
+void setLed(uint8_t r, uint8_t g, uint8_t b) {
+  rgbLed.setPixelColor(0, rgbLed.Color(r, g, b));
+  rgbLed.show();
+}
+
+void setLedForZone(Zone z) {
+  switch (z) {
+    case BOT_RIGHT: setLed(0,   255, 0);   break;  // GREEN
+    case BOT_LEFT:  setLed(255, 0,   0);   break;  // RED
+    case TOP_RIGHT: setLed(255, 80,  0);   break;  // ORANGE
+    case TOP_LEFT:  setLed(148, 0,   211); break;  // PURPLE
+    default:        setLed(255, 255, 255); break;  // WHITE = unknown
+  }
+}
+
+// ============================================================
 //  detectPurpleBall()
-//  Samples Pixy2 for PIXY_SAMPLE_MS. Counts votes per zone.
-//  Returns zone with highest cumulative vote count.
 // ============================================================
 Zone detectPurpleBall() {
 
@@ -295,10 +393,10 @@ Zone detectPurpleBall() {
       Serial.println("PIXY | NOT DETECTED");
     }
 
-    delay(50);  // ~30 samples over 1500ms
+    delay(50);
   }
 
-  // ── Vote summary ──────────────────────────────────────────
+  // Vote summary
   Serial.println("─── PIXY VOTE SUMMARY ───");
   Serial.print("  TOP-LEFT : "); Serial.println(voteTL);
   Serial.print("  BOT-LEFT : "); Serial.println(voteBL);
@@ -307,7 +405,6 @@ Zone detectPurpleBall() {
   Serial.print("  OTHER    : "); Serial.println(voteOther);
   Serial.print("  MISSED   : "); Serial.println(missed);
 
-  // ── Pick winner ───────────────────────────────────────────
   int best = max({voteTL, voteBL, voteTR, voteBR});
 
   if (best == 0) {
@@ -315,7 +412,6 @@ Zone detectPurpleBall() {
     return UNKNOWN;
   }
 
-  // Priority order on tie: TL > BL > TR > BR
   if      (voteTL == best) { Serial.println("  RESULT: TOP-LEFT");  return TOP_LEFT;  }
   else if (voteBL == best) { Serial.println("  RESULT: BOT-LEFT");  return BOT_LEFT;  }
   else if (voteTR == best) { Serial.println("  RESULT: TOP-RIGHT"); return TOP_RIGHT; }
@@ -339,265 +435,156 @@ Zone classifyZone(int cx, int cy) {
 }
 
 // ============================================================
-//  TRAJECTORY 1 — Bot-Left (Purple → Orange)
-//
-//  Bot starts facing 0°, ball is bottom-left.
-//  1. Servo → LOAD
-//  2. Forward phase 1
-//  3. Servo → SHOOT, delay
-//  4. Forward phase 2, intake ON
-//  5. Pause
-//  6. Servo → NEUTRAL
-//  7. Forward phase 3
-//  8. Stop, intake OFF
-//  9. Final SHOOT
-//  → Hands off to rectangle from Side 1 (heading 0°)
+//  TRAJECTORY 1 — Bot-Left
 // ============================================================
 void runTrajectory1() {
   Serial.println("=== TRAJECTORY 1 START (Bot-Left: Purple → Orange) ===");
-
   intakeOn();
-
   Serial.println("T1 S1: Servo → LOAD");
   servoWrite(SERVO_LOAD);
   delay(500);
-
   Serial.println("T1 S2: Forward phase 1");
   executeDrive(T1_PHASE1_MS, 0.0);
-
   Serial.println("T1 S3: Servo → SHOOT");
   servoWrite(SERVO_SHOOT);
   delay(500);
-
   Serial.println("T1 S4: Forward phase 2 (intake ON)");
   executeDrive(T1_PHASE2_MS, 0.0);
-
   Serial.println("T1 S5: Pause");
   motorsStop();
   delay(T1_PAUSE_MS);
-
   Serial.println("T1 S6: Servo → NEUTRAL");
   servoWrite(SERVO_NEUTRAL);
   delay(250);
-
   Serial.println("T1 S7: Forward phase 3");
   executeDrive(T1_PHASE3_MS, 0.0);
-
   Serial.println("T1 S8: Stop");
   motorsStop();
   intakeOff();
   delay(200);
-
   Serial.println("T1 S9: Final SHOOT");
   servoWrite(SERVO_SHOOT);
   delay(250);
-
   Serial.println("=== TRAJECTORY 1 DONE ===");
   waitMs(pause_ms);
 }
 
 // ============================================================
-//  TRAJECTORY 2 — Top-Left (Orange → Purple)
-//
-//  Bot starts facing 0°, ball is top-left.
-//  1. Servo → NEUTRAL
-//  2. Forward phase 1, intake ON
-//  3. Stop
-//  4. SHOOT: servo → SHOOT
-//  5. Servo → LOAD
-//  6. Forward phase 2, intake ON
-//  7. Servo → NEUTRAL
-//  8. Stop, intake OFF
-//  → Hands off to rectangle from Side 1 (heading 0°)
+//  TRAJECTORY 2 — Top-Left
 // ============================================================
 void runTrajectory2() {
   Serial.println("=== TRAJECTORY 2 START (Top-Left: Orange → Purple) ===");
-
   intakeOn();
-
   Serial.println("T2 S1: Servo → NEUTRAL");
   servoWrite(SERVO_NEUTRAL);
   delay(250);
-
   Serial.println("T2 S2: Forward phase 1");
   executeDrive(T2_PHASE1_MS, 0.0);
-
   Serial.println("T2 S3: Stop");
   motorsStop();
   delay(150);
-
   Serial.println("T2 S4: SHOOT");
   servoWrite(SERVO_SHOOT);
   delay(250);
-
   Serial.println("T2 S5: Servo → LOAD");
   servoWrite(SERVO_LOAD);
   delay(250);
-
   Serial.println("T2 S6: Forward phase 2 (intake ON)");
   executeDrive(T2_PHASE2_MS, 0.0);
-
   Serial.println("T2 S7: Servo → NEUTRAL");
   servoWrite(SERVO_NEUTRAL);
   delay(250);
-
   Serial.println("T2 S8: Stop");
   motorsStop();
-
   Serial.println("=== TRAJECTORY 2 DONE ===");
   waitMs(pause_ms);
 }
 
 // ============================================================
-//  TRAJECTORY 3 — Bot-Right (Purple → Orange, right side)
-//
-//  Ball is bottom-right. Bot must:
-//  1. Turn 60° clockwise to face the ball
-//  2. Run same intake/shoot logic as Trajectory 1 (at 60° heading)
-//  3. Turn to 180° (face Side 3 direction)
-//  4. Hand off to rectangle starting from Side 3
+//  TRAJECTORY 3 — Bot-Right
 // ============================================================
 void runTrajectory3() {
   Serial.println("=== TRAJECTORY 3 START (Bot-Right: Purple → Orange) ===");
-
-  // Step 1: Turn 60° right to face the ball
   Serial.println("T3 S1: Turn → 60°");
   executeTurn(30.0);
   waitMs(pause_ms);
-
   intakeOn();
-
-  // Step 2: Servo → LOAD
   Serial.println("T3 S2: Servo → LOAD");
   servoWrite(SERVO_LOAD);
   delay(500);
-
-  // Step 3: Forward phase 1 (heading locked at 60°)
   Serial.println("T3 S3: Forward phase 1 @ 60°");
   executeDrive(T3_PHASE1_MS, 30.0);
-
-  // Step 4: Servo → SHOOT
   Serial.println("T3 S4: Servo → SHOOT");
   servoWrite(SERVO_SHOOT);
   delay(500);
-
-  // Step 5: Forward phase 2, intake ON
   Serial.println("T3 S5: Forward phase 2 @ 60°");
   executeDrive(T3_PHASE2_MS, 30.0);
-
-  // Step 6: Pause
   Serial.println("T3 S6: Pause");
   motorsStop();
   delay(T3_PAUSE_MS);
-
-  // Step 7: Servo → NEUTRAL
   Serial.println("T3 S7: Servo → NEUTRAL");
   servoWrite(SERVO_NEUTRAL);
   delay(250);
-
-  // Step 8: Forward phase 3
   Serial.println("T3 S8: Forward phase 3 @ 60°");
   executeDrive(T3_PHASE3_MS, 30.0);
-
-  // Step 9: Stop, intake OFF
   Serial.println("T3 S9: Stop");
   motorsStop();
   intakeOff();
   delay(200);
-
-  // Step 10: Final SHOOT
   Serial.println("T3 S10: Final SHOOT");
   servoWrite(SERVO_SHOOT);
   delay(250);
-
-  // Step 11: Turn to 180° to align with Side 3 direction
   Serial.println("T3 S11: Realign → 180°");
   executeTurn(180.0);
   waitMs(pause_ms);
-
   Serial.println("=== TRAJECTORY 3 DONE ===");
   waitMs(pause_ms);
 }
 
 // ============================================================
-//  TRAJECTORY 4 — Top-Right (Orange → Purple, right side)
-//
-//  Ball is top-right. Bot must:
-//  1. Turn 60° clockwise to face the ball
-//  2. Run same intake/shoot logic as Trajectory 2 (at 60° heading)
-//  3. Turn to 180° (face Side 3 direction)
-//  4. Hand off to rectangle starting from Side 3
+//  TRAJECTORY 4 — Top-Right
 // ============================================================
 void runTrajectory4() {
   Serial.println("=== TRAJECTORY 4 START (Top-Right: Orange → Purple) ===");
-
-  // Step 1: Turn 60° right to face the ball
   Serial.println("T4 S1: Turn → 60°");
   executeTurn(30.0);
   waitMs(pause_ms);
-
   intakeOn();
-
-  // Step 2: Servo → NEUTRAL
   Serial.println("T4 S2: Servo → NEUTRAL");
   servoWrite(SERVO_NEUTRAL);
   delay(250);
-
-  // Step 3: Forward phase 1 (heading locked at 60°)
   Serial.println("T4 S3: Forward phase 1 @ 60°");
   executeDrive(T4_PHASE1_MS, 30.0);
-
-  // Step 4: Stop
   Serial.println("T4 S4: Stop");
   motorsStop();
   delay(150);
-
-  // Step 5: SHOOT
   Serial.println("T4 S5: SHOOT");
   servoWrite(SERVO_SHOOT);
   delay(250);
-
-  // Step 6: Servo → LOAD
   Serial.println("T4 S6: Servo → LOAD");
   servoWrite(SERVO_LOAD);
   delay(250);
-
-  // Step 7: Forward phase 2, intake ON
   Serial.println("T4 S7: Forward phase 2 @ 60°");
   executeDrive(T4_PHASE2_MS, 30.0);
-
-  // Step 8: Servo → NEUTRAL
   Serial.println("T4 S8: Servo → NEUTRAL");
   servoWrite(SERVO_NEUTRAL);
   delay(250);
-
-  // Step 9: Stop
   Serial.println("T4 S9: Stop");
   motorsStop();
-
-  // Step 10: Turn to 180° to align with Side 3 direction
   Serial.println("T4 S10: Realign → 180°");
   executeTurn(180.0);
   waitMs(pause_ms);
-
   Serial.println("=== TRAJECTORY 4 DONE ===");
   waitMs(pause_ms);
 }
 
 // ============================================================
-//  runRectangleLap()
-//  Full rectangle lap starting from Side 1 (heading 0°).
-//  Used after Trajectory 1 and 2.
-//
-//  Side 1 → Turn1(45°) → Side2(90°) → Turn2(135°)
-//  → Side3(180°) → Turn3(-135°) → Side4(-90°) → Turn4(-45°)
+//  runRectangleLap() — from Side 1
 // ============================================================
 void runRectangleLap() {
-
   intakeOn();
   servoWrite(SERVO_NEUTRAL);
 
-  // SIDE 1 — TOF triggered, shoot midway
   Serial.println("=== RECT: Side 1 @ 0° (TOF + shoot midway) ===");
   executeDriveUntilClose(0.0, STOP_DISTANCE_CM, true);
   waitMs(pause_ms);
@@ -606,7 +593,6 @@ void runRectangleLap() {
   executeTurn(45.0);
   waitMs(pause_ms);
 
-  // SIDE 2 — time-based
   Serial.println("=== RECT: Side 2 @ 90° (time) ===");
   executeDrive(breadth_pause, 90.0);
   waitMs(pause_ms);
@@ -615,7 +601,6 @@ void runRectangleLap() {
   executeTurn(135.0);
   waitMs(pause_ms);
 
-  // SIDE 3 — TOF triggered, no shoot
   Serial.println("=== RECT: Side 3 @ 180° (TOF) ===");
   executeDriveUntilClose(180.0, STOP_DISTANCE_CM, false);
   waitMs(pause_ms);
@@ -624,7 +609,6 @@ void runRectangleLap() {
   executeTurn(-135.0);
   waitMs(pause_ms);
 
-  // SIDE 4 — time-based
   Serial.println("=== RECT: Side 4 @ -90° (time) ===");
   executeDrive(breadth_pause, -90.0);
   waitMs(pause_ms);
@@ -637,19 +621,12 @@ void runRectangleLap() {
 }
 
 // ============================================================
-//  runRectangleLapFromSide3()
-//  Rectangle lap starting from Side 3 (heading 180°).
-//  Used after Trajectory 3 and 4 — bot is already at 180°.
-//
-//  Side 3 → Turn3(-135°) → Side4(-90°) → Turn4(-45°)
-//  → Side1(0°) → Turn1(45°) → Side2(90°) → Turn2(135°)
+//  runRectangleLapFromSide3() — from Side 3
 // ============================================================
 void runRectangleLapFromSide3() {
-
   intakeOn();
   servoWrite(SERVO_NEUTRAL);
 
-  // SIDE 3 — TOF triggered, no shoot (entering mid-rect)
   Serial.println("=== RECT(S3): Side 3 @ 180° (TOF) ===");
   executeDriveUntilClose(180.0, STOP_DISTANCE_CM, false);
   waitMs(pause_ms);
@@ -658,7 +635,6 @@ void runRectangleLapFromSide3() {
   executeTurn(-135.0);
   waitMs(pause_ms);
 
-  // SIDE 4 — time-based
   Serial.println("=== RECT(S3): Side 4 @ -90° (time) ===");
   executeDrive(breadth_pause, -90.0);
   waitMs(pause_ms);
@@ -667,7 +643,6 @@ void runRectangleLapFromSide3() {
   executeTurn(-45.0);
   waitMs(pause_ms);
 
-  // SIDE 1 — TOF triggered, shoot midway
   Serial.println("=== RECT(S3): Side 1 @ 0° (TOF + shoot midway) ===");
   executeDriveUntilClose(0.0, STOP_DISTANCE_CM, true);
   waitMs(pause_ms);
@@ -676,7 +651,6 @@ void runRectangleLapFromSide3() {
   executeTurn(45.0);
   waitMs(pause_ms);
 
-  // SIDE 2 — time-based
   Serial.println("=== RECT(S3): Side 2 @ 90° (time) ===");
   executeDrive(breadth_pause, 90.0);
   waitMs(pause_ms);
@@ -730,7 +704,6 @@ void executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMid
       break;
     }
 
-    // Non-blocking shoot state machine
     if (shootMidway && !shootDone) {
       if (!shootTriggered && (now - startTime >= 600)) {
         Serial.println("Mid-drive SHOOT triggered");
@@ -797,8 +770,10 @@ void executeTurn(float targetAngle) {
         Serial.print("/"); Serial.print(TRN_STABLE_COUNT);
         Serial.print(" | H:"); Serial.print(heading, 1);
         Serial.print(" E:"); Serial.println(error, 1);
-        Serial.print("Turn done. H:"); Serial.print(heading, 1); Serial.println("deg");
-        return;
+        if (stableCount >= TRN_STABLE_COUNT) {
+          Serial.print("Turn done. H:"); Serial.print(heading, 1); Serial.println("deg");
+          return;
+        }
       } else {
         stableCount = 0;
         runTurnPID(targetAngle, prevErr, integ);
@@ -831,7 +806,7 @@ void runForwardPID(float targetHeading, float &prevErr, float &integ) {
 
   float correction = (FWD_KP * error) + (FWD_KI * integ) + (FWD_KD * derivative);
   correction = constrain(correction, -FWD_MAX_CORRECT, FWD_MAX_CORRECT);
-// correction to be updated for left and right --- leftspeed to be the highest and right speed to be [255 - 2(correction)]
+
   int leftSpeed  = constrain(FWD_BASE_SPEED + (int)correction, 0, 255);
   int rightSpeed = constrain(FWD_BASE_SPEED - (int)correction, 0, 255);
 

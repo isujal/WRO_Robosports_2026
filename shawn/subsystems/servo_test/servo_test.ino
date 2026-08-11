@@ -4,7 +4,7 @@
 //  Enter angle (0–180) in Serial Monitor → servo moves instantly
 // ============================================================
 
-#define SERVO_PIN 4
+#define SERVO_PIN 40
 
 constexpr uint32_t SERVO_PWM_FREQ = 50;
 constexpr uint8_t  SERVO_PWM_RES  = 14;

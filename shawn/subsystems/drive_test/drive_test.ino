@@ -13,8 +13,8 @@
 //    s<speed> → Set speed only           (e.g. s200)
 // ============================================================
 
-const int M1A = 6;
-const int M1B = 7;
+const int M1A = 42;
+const int M1B = 41;
 const int M2A = 15;
 const int M2B = 16;
 

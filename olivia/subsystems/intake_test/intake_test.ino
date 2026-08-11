@@ -5,8 +5,8 @@
 //  If motor moves now, problem was in previous code logic
 // ============================================================
 
-const int INTAKE_IN1 = 3;   // M2A
-const int INTAKE_IN2 = 8;  // M2B
+const int INTAKE_IN1 = 39;   // M2A
+const int INTAKE_IN2 = 38;  // M2B
 
 void setup() {
   Serial.begin(115200);
