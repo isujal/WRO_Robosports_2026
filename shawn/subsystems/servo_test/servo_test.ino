@@ -4,7 +4,7 @@
 //  Enter angle (0–180) in Serial Monitor → servo moves instantly
 // ============================================================
 
-#define SERVO_PIN 40
+#define SERVO_PIN 4
 
 constexpr uint32_t SERVO_PWM_FREQ = 50;
 constexpr uint8_t  SERVO_PWM_RES  = 14;
@@ -33,7 +33,7 @@ void setup() {
 
   Serial.println("Servo ready. Known positions:");
   Serial.println("  0   → Neutral / Intake");
-  Serial.println("  50  → Shoot");
+  Serial.println("  65  → Shoot");
   Serial.println("  140 → Load");
   Serial.println("Enter any angle (0–180) and press Enter:");
 }

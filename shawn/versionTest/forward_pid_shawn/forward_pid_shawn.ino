@@ -22,8 +22,8 @@
 #include <Adafruit_BNO08x.h>
 
 // -------- Motor Pins --------
-const int M1A = 6;
-const int M1B = 7;
+const int M1A = 42;
+const int M1B = 41;
 const int M2A = 15;
 const int M2B = 16;
 

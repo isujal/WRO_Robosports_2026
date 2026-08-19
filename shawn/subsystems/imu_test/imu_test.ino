@@ -8,8 +8,8 @@
 #include <Adafruit_BNO08x.h>
 
 // ── Pins ─────────────────────────────────────────────────────
-#define BNO08X_SDA  18
-#define BNO08X_SCL  17
+#define BNO08X_SDA  17
+#define BNO08X_SCL  16
 #define BNO08X_RST  12
 
 // ── IMU objects ──────────────────────────────────────────────

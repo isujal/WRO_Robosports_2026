@@ -46,18 +46,20 @@ const unsigned long T4_PHASE2_MS = 200;
 const int           T4_SPEED     = 180;
 
 // --- Rectangle ---
-const float STOP_DISTANCE_CM = 12.0;
+const float STOP_DISTANCE_CM = 15.0;
+const float STOP_DISTANCE_CM_2 = 6.0;
 int         breadth_pause    = 500;
 int         pause_ms         = 50;
 
 // --- Pixy2 zone detection ---
+// --- Pixy2 zone detection (SHAWN — Pixy 2.1) ---
 #define SIG_PURPLE        2
-#define MIN_AREA          200
-#define ROI_TOP_Y         55
-#define SPLIT_X           210
-#define SPLIT_Y           81
-#define DEAD_X            5
-#define DEAD_Y            5
+#define MIN_AREA          100       // was 200 — Shawn classifier uses 100
+#define ROI_TOP_Y         40        // was 55
+#define SPLIT_X           200       // was 210
+#define SPLIT_Y           77        // was 81
+#define DEAD_X            10        // was 5
+#define DEAD_Y            3         // was 5
 #define PIXY_SAMPLE_MS    1500
 
 // ============================================================
@@ -87,7 +89,7 @@ constexpr uint16_t SERVO_MIN_DUTY = (uint16_t)((500  * 16384L) / 20000);
 constexpr uint16_t SERVO_MAX_DUTY = (uint16_t)((2400 * 16384L) / 20000);
 
 const int SERVO_NEUTRAL = 0;
-const int SERVO_SHOOT   = 50;
+const int SERVO_SHOOT   = 65;
 const int SERVO_LOAD    = 140;
 
 // ============================================================
@@ -104,7 +106,7 @@ const int   FWD_INTERVAL    = 20;
 
 const float TRN_KP           = 5.0;
 const float TRN_KI           = 0.0;
-const float TRN_KD           = 0.8;
+const float TRN_KD           = 0.5;
 const int   TRN_MIN_SPEED    = 60;
 const int   TRN_MAX_SPEED    = 255;
 const float TRN_DEADBAND     = 8.0;
@@ -240,6 +242,26 @@ void loop() {
 //  Samples Pixy2 for PIXY_SAMPLE_MS. Counts votes per zone.
 //  Returns zone with highest cumulative vote count.
 // ============================================================
+// ============================================================
+//  classifyZone() — SHAWN tuned thresholds
+//  TL: cx~147  cy~60   BL: cx~146  cy~83
+//  TR: cx~240  cy~66   BR: cx~262  cy~88
+//  SPLIT_X=200  SPLIT_Y=77
+// ============================================================
+Zone classifyZone(int cx, int cy) {
+  if (cx < SPLIT_X) {
+    if (cy < 78)  return TOP_LEFT;
+    if (cy >= 78) return BOT_LEFT;
+  } else {
+    if (cy < 82)  return TOP_RIGHT;
+    if (cy >= 82) return BOT_RIGHT;
+  }
+  return UNKNOWN;
+}
+
+// ============================================================
+//  detectPurpleBall() — unchanged logic, updated print
+// ============================================================
 Zone detectPurpleBall() {
 
   int voteTL    = 0;
@@ -280,9 +302,14 @@ Zone detectPurpleBall() {
 
     if (found) {
       Zone z = classifyZone(bestCx, bestCy);
-      Serial.print("PIXY | cx="); Serial.print(bestCx);
-      Serial.print(" cy="); Serial.print(bestCy);
-      Serial.print(" → ");
+
+      // ── Same debug print as zone_classifier.ino ──────────
+      Serial.printf("cx=%-3d  cy=%-3d  isTop=%d  isBot=%d  isLeft=%d  isRight=%d  zone=",
+                    bestCx, bestCy,
+                    bestCy < (SPLIT_Y - DEAD_Y),
+                    bestCy > (SPLIT_Y + DEAD_Y),
+                    bestCx < (SPLIT_X - DEAD_X),
+                    bestCx > (SPLIT_X + DEAD_X));
 
       switch (z) {
         case TOP_LEFT:  voteTL++;    Serial.println("TOP-LEFT");  break;
@@ -296,7 +323,7 @@ Zone detectPurpleBall() {
       Serial.println("PIXY | NOT DETECTED");
     }
 
-    delay(50);  // ~30 samples over 1500ms
+    delay(50);
   }
 
   // ── Vote summary ──────────────────────────────────────────
@@ -316,27 +343,10 @@ Zone detectPurpleBall() {
     return UNKNOWN;
   }
 
-  // Priority order on tie: TL > BL > TR > BR
   if      (voteTL == best) { Serial.println("  RESULT: TOP-LEFT");  return TOP_LEFT;  }
   else if (voteBL == best) { Serial.println("  RESULT: BOT-LEFT");  return BOT_LEFT;  }
   else if (voteTR == best) { Serial.println("  RESULT: TOP-RIGHT"); return TOP_RIGHT; }
   else                     { Serial.println("  RESULT: BOT-RIGHT"); return BOT_RIGHT; }
-}
-
-// ============================================================
-//  classifyZone()
-// ============================================================
-Zone classifyZone(int cx, int cy) {
-  bool isLeft  = cx < (SPLIT_X - DEAD_X);
-  bool isRight = cx > (SPLIT_X + DEAD_X);
-  bool isTop   = cy < (SPLIT_Y - DEAD_Y);
-  bool isBot   = cy > (SPLIT_Y + DEAD_Y);
-
-  if (isLeft  && isTop) return TOP_LEFT;
-  if (isLeft  && isBot) return BOT_LEFT;
-  if (isRight && isTop) return TOP_RIGHT;
-  if (isRight && isBot) return BOT_RIGHT;
-  return UNKNOWN;
 }
 
 // ============================================================
@@ -618,7 +628,7 @@ void runRectangleLap() {
 
   // SIDE 3 — TOF triggered, no shoot
   Serial.println("=== RECT: Side 3 @ 180° (TOF) ===");
-  executeDriveUntilClose(180.0, STOP_DISTANCE_CM, false);
+  executeDriveUntilClose(180.0, STOP_DISTANCE_CM_2, false);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 3 → -135° ===");

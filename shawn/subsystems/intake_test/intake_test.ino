@@ -9,8 +9,8 @@
 //    b<0-255> → Backward at speed (e.g. b100)
 // ============================================================
 
-const int INTAKE_IN1 = 39;   // M2A (PWM pin)
-const int INTAKE_IN2 = 38;   // M2B
+const int INTAKE_IN1 = 38;   // M2A (PWM pin)
+const int INTAKE_IN2 = 39;   // M2B
 
 int currentSpeed = 255;  // Default full speed
 

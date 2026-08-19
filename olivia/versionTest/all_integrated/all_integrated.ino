@@ -16,8 +16,8 @@ int long_pause = 750;
 int breadth_pause = 300;
 
 // -------- Drive Motor Pins --------
-const int M1A = 6;
-const int M1B = 7;
+const int M1A = 42;
+const int M1B = 41;
 const int M2A = 15;
 const int M2B = 16;
 
@@ -27,8 +27,8 @@ const int M2B = 16;
 #define BNO08X_RST 12
 
 // -------- Intake Motor Pins --------
-const int INTAKE_IN1   = 3;
-const int INTAKE_IN2   = 8;
+const int INTAKE_IN1   = 38;
+const int INTAKE_IN2   = 39;
 const int INTAKE_SPEED = 255;   // 0–255
 
 // -------- Servo (proven from PS5 bot — 14-bit LEDC) --------
@@ -38,8 +38,8 @@ constexpr uint8_t  SERVO_PWM_RES  = 14;
 constexpr uint16_t SERVO_MIN_DUTY = (uint16_t)((500  * 16384L) / 20000);
 constexpr uint16_t SERVO_MAX_DUTY = (uint16_t)((2400 * 16384L) / 20000);
 
-const int SERVO_INTAKE_POS = 90;   // normal running position
-const int SERVO_SHOOT_POS  = 135;  // shooting position after Side 1
+const int SERVO_INTAKE_POS = 0;   // normal running position
+const int SERVO_SHOOT_POS  = 65;  // shooting position after Side 1
 
 // ============================================================
 //  FORWARD PID CONSTANTS
