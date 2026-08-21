@@ -24,7 +24,7 @@ const int M2B = 16;
 #define BNO08X_SDA 18
 #define BNO08X_SCL 17
 #define BNO08X_RST 12
-
+ We are using the pixie button bot We are using the pixie button bottom points based a freedom to the qualification for exactly defined exactly note because it's called alternates testing and directions female to female jumper
 // -------- VL53L0X Pins (Wire1 — Bus 1) --------
 #define TOF_SDA 46
 #define TOF_SCL 9

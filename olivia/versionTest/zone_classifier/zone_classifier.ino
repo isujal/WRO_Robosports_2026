@@ -10,9 +10,9 @@
 // Midpoint X = (158+263)/2 = 210
 // Midpoint Y = (68+95)/2   = 81
 #define SPLIT_X     210
-#define SPLIT_Y     81
-#define DEAD_X      5
-#define DEAD_Y      5
+#define SPLIT_Y     74
+#define DEAD_X      10
+#define DEAD_Y      6
 
 #define FOCAL_PX    180.0f
 #define PURPLE_DIAM 5.0f

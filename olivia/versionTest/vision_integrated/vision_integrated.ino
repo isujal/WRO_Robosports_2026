@@ -1,21 +1,8 @@
-// ============================================================
-//  FULL RUN — ESP32-S3 + BNO085 + VL53L0X + Pixy2 + MDD 3A
-//
-//  BOOT FLOW:
-//    1. Init all hardware
-//    2. Sample Pixy2 for PIXY_SAMPLE_MS (1500ms)
-//    3. Pick zone by most-seen cumulative vote:
-//       BOT-LEFT  → runTrajectory1()  then rectangle from Side 1
-//       TOP-LEFT  → runTrajectory2()  then rectangle from Side 1
-//       BOT-RIGHT → runTrajectory3()  then rectangle from Side 3
-//       TOP-RIGHT → runTrajectory4()  then rectangle from Side 3
-//    4. Rectangle loop forever
-// ============================================================
-
 #include <Wire.h>
 #include <Adafruit_BNO08x.h>
 #include <Adafruit_VL53L0X.h>
 #include <Pixy2SPI_SS.h>
+
 
 // ============================================================
 //  ★ TUNE THESE ★
@@ -33,7 +20,7 @@ const unsigned long T2_PHASE1_MS = 400;
 const unsigned long T2_PHASE2_MS = 200;
 const int           T2_SPEED     = 180;
 
-// --- Trajectory 3 (Bot-Right: 60° t    urn + T1 logic + realign) ---
+// --- Trajectory 3 (Bot-Right: 60° turn + T1 logic + realign) ---
 const unsigned long T3_PHASE1_MS = 450;
 const unsigned long T3_PHASE2_MS = 300;
 const unsigned long T3_PHASE3_MS = 200;
@@ -46,7 +33,8 @@ const unsigned long T4_PHASE2_MS = 200;
 const int           T4_SPEED     = 180;
 
 // --- Rectangle ---
-const float STOP_DISTANCE_CM = 12.0;
+const float STOP_DISTANCE_CM = 11.0;
+const float STOP_DISTANCE_CM_2 = 7.0;
 int         breadth_pause    = 500;
 int         pause_ms         = 50;
 
@@ -59,6 +47,12 @@ int         pause_ms         = 50;
 #define DEAD_X            5
 #define DEAD_Y            5
 #define PIXY_SAMPLE_MS    1500
+
+// --- Referee start toggle switch ---
+#define SWITCH_PWR        48   // always HIGH — acts as 3.3V supply for the switch
+#define SWITCH_SIG        21   // reads the toggle switch state
+#define SWITCH_DEBOUNCE_READS   5   // consecutive HIGH reads required to accept start
+#define SWITCH_POLL_MS          10  // delay between polls while waiting
 
 // ============================================================
 //  HARDWARE PINS
@@ -73,14 +67,14 @@ const int M2B = 16;
 #define BNO08X_SCL 17
 #define BNO08X_RST 12
 
-#define TOF_SDA 46
-#define TOF_SCL 9
+#define TOF_SDA 2
+#define TOF_SCL 1
 
 const int INTAKE_IN1   = 38;
 const int INTAKE_IN2   = 39;
 const int INTAKE_SPEED = 255;
 
-#define SERVO_PIN 4
+#define SERVO_PIN 40
 constexpr uint32_t SERVO_PWM_FREQ = 50;
 constexpr uint8_t  SERVO_PWM_RES  = 14;
 constexpr uint16_t SERVO_MIN_DUTY = (uint16_t)((500  * 16384L) / 20000);
@@ -124,6 +118,8 @@ Pixy2SPI_SS       pixy;
 
 enum Zone { UNKNOWN, TOP_LEFT, BOT_LEFT, TOP_RIGHT, BOT_RIGHT };
 
+Zone decidedZone = UNKNOWN;   // trajectory decision made once, right after boot
+
 // ============================================================
 //  FUNCTION PROTOTYPES
 // ============================================================
@@ -139,6 +135,7 @@ void  runTrajectory4();
 void  runRectangleFromSide1();
 void  runRectangleFromSide3();
 void  runRectangleLap();
+void  runRectangleLapFromSide3();
 
 void  executeDrive(unsigned long durationMs, float targetHeading);
 void  executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMidway = false);
@@ -170,12 +167,20 @@ float wrapAngle(float a);
 void  initTOF();
 float getDistanceCm();
 
+void  initStartSwitch();
+bool  isStartSwitchOn();
+void  waitForStartSwitch();
+void  runMission(Zone z);
+
 // ============================================================
 //  SETUP
 // ============================================================
 void setup() {
   Serial.begin(115200);
 
+  // --- Bring up all hardware. The fact that we reach this line
+  //     at all means the MAIN POWER SWITCH is ON (it powers the
+  //     ESP32 + sensors directly, there's no GPIO for it). ---
   setMotorPins();
   motorsStop();
   initIntake();
@@ -183,6 +188,7 @@ void setup() {
   initIMU();
   zeroIMU();
   initTOF();
+  initStartSwitch();
 
   pixy.init();
   pixy.changeProg("color_connected_components");
@@ -191,47 +197,123 @@ void setup() {
   Serial.println("All hardware ready. Sampling Pixy2...");
   delay(500);
   zeroIMU();
+
+  // --- STEP: Detect purple ball zone and DECIDE trajectory now,
+  //     right after power-on, before the referee gives the
+  //     start signal. ---
+  decidedZone = detectPurpleBall();
+  Serial.print("=== TRAJECTORY DECISION LOCKED IN: ");
+  switch (decidedZone) {
+    case TOP_LEFT:  Serial.println("TOP-LEFT ===");  break;
+    case BOT_LEFT:  Serial.println("BOT-LEFT ===");  break;
+    case TOP_RIGHT: Serial.println("TOP-RIGHT ==="); break;
+    case BOT_RIGHT: Serial.println("BOT-RIGHT ==="); break;
+    default:        Serial.println("UNKNOWN (defaults to Trajectory 1) ==="); break;
+  }
+
+  // --- STEP: Wait for referee to flip the toggle switch (pin 21)
+  //     before the bot is allowed to actually move. ---
+  waitForStartSwitch();
+
+  // --- STEP: Run the decision that was already made. This never
+  //     returns — it hands off into the endless rectangle-lap
+  //     loop, same as the original firmware's loop(). ---
+  runMission(decidedZone);
 }
 
 // ============================================================
 //  LOOP
+//  Intentionally idle — runMission() (called at the end of
+//  setup(), once the referee-start switch is triggered) never
+//  returns, since it hands off into an endless rectangle-lap
+//  while(true) loop. loop() only runs at all if runMission()
+//  somehow returned, which should not happen in normal operation.
 // ============================================================
 void loop() {
+  // Safety fallback — should never be reached.
+  motorsStop();
+  delay(100);
+}
 
-  // ── STEP 1: Detect purple ball zone ──────────────────────
-  Zone detectedZone = detectPurpleBall();
-
-  // ── STEP 2: Run correct trajectory + correct rect entry ──
-  if (detectedZone == BOT_LEFT) {
+// ============================================================
+//  runMission()
+//  Executes the trajectory that was decided right after boot,
+//  then hands off to the matching endless rectangle-lap loop.
+//  Called once, after the referee-start toggle switch fires.
+// ============================================================
+void runMission(Zone z) {
+  if (z == BOT_LEFT) {
     Serial.println("DECISION: BOT-LEFT → Trajectory 1 → Rect from Side 1");
     runTrajectory1();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 1) ===");
     while (true) { runRectangleLap(); }
 
-  } else if (detectedZone == TOP_LEFT) {
+  } else if (z == TOP_LEFT) {
     Serial.println("DECISION: TOP-LEFT → Trajectory 2 → Rect from Side 1");
     runTrajectory2();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 1) ===");
     while (true) { runRectangleLap(); }
 
-  } else if (detectedZone == BOT_RIGHT) {
+  } else if (z == BOT_RIGHT) {
     Serial.println("DECISION: BOT-RIGHT → Trajectory 3 → Rect from Side 3");
     runTrajectory3();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 3) ===");
     while (true) { runRectangleLapFromSide3(); }
 
-  } else if (detectedZone == TOP_RIGHT) {
+  } else if (z == TOP_RIGHT) {
     Serial.println("DECISION: TOP-RIGHT → Trajectory 4 → Rect from Side 3");
     runTrajectory4();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 3) ===");
     while (true) { runRectangleLapFromSide3(); }
 
-  } 
-  else {
+  } else {
     Serial.println("DECISION: UNKNOWN → defaulting to Trajectory 1 → Rect from Side 1");
     runTrajectory1();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 1) ===");
     while (true) { runRectangleLap(); }
+  }
+}
+
+// ============================================================
+//  START SWITCH (referee toggle, pin 21)
+// ============================================================
+void initStartSwitch() {
+  pinMode(SWITCH_PWR, OUTPUT);
+  digitalWrite(SWITCH_PWR, HIGH);   // acts as a steady 3.3V supply for the switch
+  pinMode(SWITCH_SIG, INPUT_PULLDOWN);
+  Serial.println("Start switch ready (SIG=pin21, PWR=pin48).");
+}
+
+bool isStartSwitchOn() {
+  return digitalRead(SWITCH_SIG) == HIGH;
+}
+
+// Blocks until the toggle switch is flipped ON, with simple
+// debounce (must read HIGH for SWITCH_DEBOUNCE_READS consecutive
+// polls) so switch bounce / vibration can't false-trigger a start.
+void waitForStartSwitch() {
+  Serial.println("=== Waiting for REFEREE START (toggle switch, pin 21) ===");
+
+  int stableHighCount = 0;
+  unsigned long lastPrint = millis();
+
+  while (true) {
+    if (isStartSwitchOn()) {
+      stableHighCount++;
+      if (stableHighCount >= SWITCH_DEBOUNCE_READS) {
+        Serial.println("=== START SIGNAL RECEIVED — GO! ===");
+        return;
+      }
+    } else {
+      stableHighCount = 0;
+    }
+
+    if (millis() - lastPrint >= 1000) {
+      lastPrint = millis();
+      Serial.println("... still waiting for start switch ...");
+    }
+
+    delay(SWITCH_POLL_MS);
   }
 }
 
@@ -618,7 +700,7 @@ void runRectangleLap() {
 
   // SIDE 3 — TOF triggered, no shoot
   Serial.println("=== RECT: Side 3 @ 180° (TOF) ===");
-  executeDriveUntilClose(180.0, STOP_DISTANCE_CM, false);
+  executeDriveUntilClose(180.0, STOP_DISTANCE_CM_2, false);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 3 → -135° ===");
@@ -652,7 +734,7 @@ void runRectangleLapFromSide3() {
 
   // SIDE 3 — TOF triggered, no shoot (entering mid-rect)
   Serial.println("=== RECT(S3): Side 3 @ 180° (TOF) ===");
-  executeDriveUntilClose(180.0, STOP_DISTANCE_CM, false);
+  executeDriveUntilClose(180.0, STOP_DISTANCE_CM_2, false);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 3 → -135° ===");

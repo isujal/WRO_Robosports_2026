@@ -16,13 +16,19 @@
 #include <Adafruit_BNO08x.h>
 #include <Adafruit_VL53L0X.h>
 #include <Pixy2SPI_SS.h>
+// Zone decidedZone = UNKNOWN;
 
+// --- Referee start toggle switch ---
+#define SWITCH_PWR              48
+#define SWITCH_SIG              47
+#define SWITCH_DEBOUNCE_READS   5
+#define SWITCH_POLL_MS          10
 // ============================================================
 //  ★ TUNE THESE ★
 // ============================================================
 
 // --- Trajectory 1 (Bot-Left: Purple → Orange) ---
-const unsigned long T1_PHASE1_MS = 400;
+const unsigned long T1_PHASE1_MS = 430;
 const unsigned long T1_PHASE2_MS = 300;
 const unsigned long T1_PHASE3_MS = 200;
 const unsigned long T1_PAUSE_MS  = 200;
@@ -34,7 +40,7 @@ const unsigned long T2_PHASE2_MS = 200;
 const int           T2_SPEED     = 180;
 
 // --- Trajectory 3 (Bot-Right: 60° t    urn + T1 logic + realign) ---
-const unsigned long T3_PHASE1_MS = 450;
+const unsigned long T3_PHASE1_MS = 480;
 const unsigned long T3_PHASE2_MS = 300;
 const unsigned long T3_PHASE3_MS = 200;
 const unsigned long T3_PAUSE_MS  = 200;
@@ -42,7 +48,7 @@ const int           T3_SPEED     = 180;
 
 // --- Trajectory 4 (Top-Right: 60° turn + T2 logic + realign) ---
 const unsigned long T4_PHASE1_MS = 400;
-const unsigned long T4_PHASE2_MS = 200;
+const unsigned long T4_PHASE2_MS = 400;
 const int           T4_SPEED     = 180;
 
 // --- Rectangle ---
@@ -75,20 +81,20 @@ const int M2B = 16;
 #define BNO08X_SCL 17
 #define BNO08X_RST 12
 
-#define TOF_SDA 46
-#define TOF_SCL 9
+#define TOF_SDA 9
+#define TOF_SCL 46
 
 const int INTAKE_IN1   = 38;
 const int INTAKE_IN2   = 39;
 const int INTAKE_SPEED = 255;
 
-#define SERVO_PIN 4
+#define SERVO_PIN 40
 constexpr uint32_t SERVO_PWM_FREQ = 50;
 constexpr uint8_t  SERVO_PWM_RES  = 14;
 constexpr uint16_t SERVO_MIN_DUTY = (uint16_t)((500  * 16384L) / 20000);
 constexpr uint16_t SERVO_MAX_DUTY = (uint16_t)((2400 * 16384L) / 20000);
 
-const int SERVO_NEUTRAL = 0;
+const int SERVO_NEUTRAL = 20;
 const int SERVO_SHOOT   = 65;
 const int SERVO_LOAD    = 140;
 
@@ -125,6 +131,8 @@ Adafruit_VL53L0X  lox;
 Pixy2SPI_SS       pixy;
 
 enum Zone { UNKNOWN, TOP_LEFT, BOT_LEFT, TOP_RIGHT, BOT_RIGHT };
+
+Zone decidedZone = UNKNOWN;   // ← add here
 
 // ============================================================
 //  FUNCTION PROTOTYPES
@@ -170,6 +178,9 @@ float shortestError(float target, float current);
 float wrapAngle(float a);
 
 void  initTOF();
+void  initStartSwitch();
+bool  isStartSwitchOn();
+void  waitForStartSwitch();
 float getDistanceCm();
 
 // ============================================================
@@ -185,6 +196,7 @@ void setup() {
   initIMU();
   zeroIMU();
   initTOF();
+  initStartSwitch();
 
   pixy.init();
   pixy.changeProg("color_connected_components");
@@ -192,7 +204,11 @@ void setup() {
 
   Serial.println("All hardware ready. Sampling Pixy2...");
   delay(500);
-  zeroIMU();
+  zeroIMU();           // second zero
+  decidedZone = detectPurpleBall();   // ← sample FIRST
+  Serial.print("=== ZONE LOCKED: ");
+  Serial.println(decidedZone);
+  waitForStartSwitch();    
 }
 
 // ============================================================
@@ -201,28 +217,28 @@ void setup() {
 void loop() {
 
   // ── STEP 1: Detect purple ball zone ──────────────────────
-  Zone detectedZone = detectPurpleBall();
+  // Zone detectedZone = detectPurpleBall();
 
   // ── STEP 2: Run correct trajectory + correct rect entry ──
-  if (detectedZone == BOT_LEFT) {
+  if (decidedZone  == BOT_LEFT) {
     Serial.println("DECISION: BOT-LEFT → Trajectory 1 → Rect from Side 1");
     runTrajectory1();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 1) ===");
     while (true) { runRectangleLap(); }
 
-  } else if (detectedZone == TOP_LEFT) {
+  } else if (decidedZone  == TOP_LEFT) {
     Serial.println("DECISION: TOP-LEFT → Trajectory 2 → Rect from Side 1");
     runTrajectory2();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 1) ===");
     while (true) { runRectangleLap(); }
 
-  } else if (detectedZone == BOT_RIGHT) {
+  } else if (decidedZone  == BOT_RIGHT) {
     Serial.println("DECISION: BOT-RIGHT → Trajectory 3 → Rect from Side 3");
     runTrajectory3();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 3) ===");
     while (true) { runRectangleLapFromSide3(); }
 
-  } else if (detectedZone == TOP_RIGHT) {
+  } else if (decidedZone  == TOP_RIGHT) {
     Serial.println("DECISION: TOP-RIGHT → Trajectory 4 → Rect from Side 3");
     runTrajectory4();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 3) ===");
@@ -427,7 +443,7 @@ void runTrajectory2() {
   intakeOn();
 
   Serial.println("T2 S1: Servo → NEUTRAL");
-  servoWrite(SERVO_NEUTRAL);
+  servoWrite(SERVO_SHOOT);
   delay(250);
 
   Serial.println("T2 S2: Forward phase 1");
@@ -895,6 +911,8 @@ void initTOF() {
   Serial.println("VL53L0X Ready.");
 }
 
+
+
 float getDistanceCm() {
   VL53L0X_RangingMeasurementData_t measure;
   lox.rangingTest(&measure, false);
@@ -902,6 +920,38 @@ float getDistanceCm() {
     return measure.RangeMilliMeter / 10.0;
   }
   return -1.0;
+}
+void initStartSwitch() {
+  pinMode(SWITCH_PWR, OUTPUT);
+  digitalWrite(SWITCH_PWR, HIGH);
+  pinMode(SWITCH_SIG, INPUT_PULLDOWN);
+  Serial.println("Start switch ready.");
+}
+
+bool isStartSwitchOn() {
+  return digitalRead(SWITCH_SIG) == HIGH;
+}
+
+void waitForStartSwitch() {
+  Serial.println("=== Waiting for REFEREE START ===");
+  int stableHighCount = 0;
+  unsigned long lastPrint = millis();
+  while (true) {
+    if (isStartSwitchOn()) {
+      stableHighCount++;
+      if (stableHighCount >= SWITCH_DEBOUNCE_READS) {
+        Serial.println("=== START SIGNAL RECEIVED — GO! ===");
+        return;
+      }
+    } else {
+      stableHighCount = 0;
+    }
+    if (millis() - lastPrint >= 1000) {
+      lastPrint = millis();
+      Serial.println("... waiting for start switch ...");
+    }
+    delay(SWITCH_POLL_MS);
+  }
 }
 
 // ============================================================
