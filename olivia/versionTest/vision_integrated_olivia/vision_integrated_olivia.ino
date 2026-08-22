@@ -3,6 +3,11 @@
 #include <Adafruit_VL53L0X.h>
 #include <Pixy2SPI_SS.h>
 
+#include <FastLED.h>
+#define LED_PIN   37
+#define NUM_LEDS  1
+CRGB leds[NUM_LEDS];
+
 
 // ============================================================
 //  ★ TUNE THESE ★
@@ -38,7 +43,7 @@ int         breadth_pause      = 500;
 int         pause_ms           = 50;
 
 // --- Pixy2 Sig3 stop (Side 1) ---
-#define SIG3_STOP_TOP_CY    120      // stop when filtered top_cy reaches this value
+#define SIG3_STOP_TOP_CY    117      // stop when filtered top_cy reaches this value
 #define SIG3_MIN_AREA       500     // ignore blobs smaller than this
 #define SIG3_EMA_ALPHA      0.7f    // EMA smoothing (lower = smoother)
 #define SIG3_TIMEOUT_MS     4000    // fallback timeout if sig3 never reaches target
@@ -50,17 +55,17 @@ int         pause_ms           = 50;
 #define SIG_PURPLE        2
 #define MIN_AREA          200
 #define ROI_TOP_Y         55
-// #define SPLIT_X           210
-// #define SPLIT_Y           79        // ★ TUNED from actual mat readings
-// #define DEAD_X            10        // ★ TUNED
-// #define DEAD_Y            2         // ★ TUNED
+#define SPLIT_X           210
+#define SPLIT_Y           79        // ★ TUNED from actual mat readings
+#define DEAD_X            10        // ★ TUNED
+#define DEAD_Y            2         // ★ TUNED
 #define PIXY_SAMPLE_MS    1500
 
 
-  #define SPLIT_X   222
-  #define SPLIT_Y   90
-  #define DEAD_X    15
-  #define DEAD_Y    3
+  // #define SPLIT_X   222
+  // #define SPLIT_Y   90
+  // #define DEAD_X    15
+  // #define DEAD_Y    3
 
 // --- Referee start toggle switch ---
 #define SWITCH_PWR              48
@@ -198,11 +203,25 @@ bool  isStartSwitchOn();
 void  waitForStartSwitch();
 void  runMission(Zone z);
 
+void setLedForZone(Zone z) {
+  switch (z) {
+    case BOT_LEFT:  leds[0] = CRGB(255,   0,   0); break;  // Red
+    case TOP_LEFT:  leds[0] = CRGB(  0, 255,   0); break;  // Green
+    case BOT_RIGHT: leds[0] = CRGB(255, 100,   0); break;  // Orange
+    case TOP_RIGHT: leds[0] = CRGB(148,   0, 211); break;  // Purple
+    default:        leds[0] = CRGB(255, 255, 255); break;  // White = UNKNOWN
+  }
+  FastLED.show();
+}
 // ============================================================
 //  SETUP
 // ============================================================
 void setup() {
   Serial.begin(115200);
+    FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_LEDS);
+  FastLED.setBrightness(80);
+  leds[0] = CRGB::Black;
+  FastLED.show();
 
   setMotorPins();
   motorsStop();
@@ -231,7 +250,13 @@ void setup() {
     default:        Serial.println("UNKNOWN ===");   break;
   }
 
+  setLedForZone(decidedZone);    // ← LED ON after detection, during wait
+
   waitForStartSwitch();
+
+  leds[0] = CRGB::Black;         // ← LED OFF the moment switch fires
+  FastLED.show();
+
   runMission(decidedZone);
 }
 

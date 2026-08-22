@@ -16,8 +16,16 @@
 #include <Adafruit_BNO08x.h>
 #include <Adafruit_VL53L0X.h>
 #include <Pixy2SPI_SS.h>
+
+#include <FastLED.h>
+#define LED_PIN   37
+#define NUM_LEDS  1
+CRGB leds[NUM_LEDS];
 // Zone decidedZone = UNKNOWN;
 
+float offset1 = 15;
+float offset2 = 5;
+int lap3Counter = 0;   // counts laps; every 3rd lap uses shorter breadth_pause for Side 4
 // --- Referee start toggle switch ---
 #define SWITCH_PWR              48
 #define SWITCH_SIG              47
@@ -28,7 +36,7 @@
 // ============================================================
 
 // --- Trajectory 1 (Bot-Left: Purple → Orange) ---
-const unsigned long T1_PHASE1_MS = 430;
+const unsigned long T1_PHASE1_MS = 450;
 const unsigned long T1_PHASE2_MS = 300;
 const unsigned long T1_PHASE3_MS = 200;
 const unsigned long T1_PAUSE_MS  = 200;
@@ -36,7 +44,7 @@ const int           T1_SPEED     = 180;
 
 // --- Trajectory 2 (Top-Left: Orange → Purple) ---
 const unsigned long T2_PHASE1_MS = 400;
-const unsigned long T2_PHASE2_MS = 200;
+const unsigned long T2_PHASE2_MS = 400;
 const int           T2_SPEED     = 180;
 
 // --- Trajectory 3 (Bot-Right: 60° t    urn + T1 logic + realign) ---
@@ -62,11 +70,17 @@ int         pause_ms         = 50;
 #define SIG_PURPLE        2
 #define MIN_AREA          100       // was 200 — Shawn classifier uses 100
 #define ROI_TOP_Y         40        // was 55
-#define SPLIT_X           200       // was 210
-#define SPLIT_Y           77        // was 81
-#define DEAD_X            10        // was 5
-#define DEAD_Y            3         // was 5
+// #define SPLIT_X           200       // was 210
+// #define SPLIT_Y           77        // was 81
+// #define DEAD_X            10        // was 5
+// #define DEAD_Y            3         // was 5
 #define PIXY_SAMPLE_MS    1500
+
+
+#define SPLIT_X   203
+  #define SPLIT_Y   93
+  #define DEAD_X    11
+  #define DEAD_Y    3
 
 // ============================================================
 //  HARDWARE PINS
@@ -146,7 +160,7 @@ void  runTrajectory2();
 void  runTrajectory3();
 void  runTrajectory4();
 
-void  runRectangleFromSide1();
+// void  runRectangleFromSide1();
 void  runRectangleFromSide3();
 void  runRectangleLap();
 
@@ -183,12 +197,27 @@ bool  isStartSwitchOn();
 void  waitForStartSwitch();
 float getDistanceCm();
 
+
+void setLedForZone(Zone z) {
+  switch (z) {
+    case BOT_LEFT:  leds[0] = CRGB(255,   0,   0); break;  // Red
+    case TOP_LEFT:  leds[0] = CRGB(  0, 255,   0); break;  // Green
+    case BOT_RIGHT: leds[0] = CRGB(255, 100,   0); break;  // Orange
+    case TOP_RIGHT: leds[0] = CRGB(148,   0, 211); break;  // Purple
+    default:        leds[0] = CRGB(255, 255, 255); break;  // White = UNKNOWN
+  }
+  FastLED.show();
+}
+
 // ============================================================
 //  SETUP
 // ============================================================
 void setup() {
   Serial.begin(115200);
-
+  FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_LEDS);
+  FastLED.setBrightness(80);
+  leds[0] = CRGB::Black;
+  FastLED.show();
   setMotorPins();
   motorsStop();
   initIntake();
@@ -208,7 +237,13 @@ void setup() {
   decidedZone = detectPurpleBall();   // ← sample FIRST
   Serial.print("=== ZONE LOCKED: ");
   Serial.println(decidedZone);
-  waitForStartSwitch();    
+
+  setLedForZone(decidedZone);        // ← LED ON after detection, during wait
+
+  waitForStartSwitch();
+
+  leds[0] = CRGB::Black;             // ← LED OFF when switch fires
+  FastLED.show();
 }
 
 // ============================================================
@@ -246,9 +281,6 @@ void loop() {
 
   } 
   else {
-    Serial.println("DECISION: UNKNOWN → defaulting to Trajectory 1 → Rect from Side 1");
-    runTrajectory1();
-    Serial.println("=== ENTERING RECTANGLE LOOP (from Side 1) ===");
     while (true) { runRectangleLap(); }
   }
 }
@@ -264,14 +296,17 @@ void loop() {
 //  TR: cx~240  cy~66   BR: cx~262  cy~88
 //  SPLIT_X=200  SPLIT_Y=77
 // ============================================================
+// ✅ FIXED — uses SPLIT_X, SPLIT_Y, DEAD_X, DEAD_Y
 Zone classifyZone(int cx, int cy) {
-  if (cx < SPLIT_X) {
-    if (cy < 78)  return TOP_LEFT;
-    if (cy >= 78) return BOT_LEFT;
-  } else {
-    if (cy < 82)  return TOP_RIGHT;
-    if (cy >= 82) return BOT_RIGHT;
-  }
+  bool isLeft  = cx < (SPLIT_X - DEAD_X);
+  bool isRight = cx > (SPLIT_X + DEAD_X);
+  bool isTop   = cy < (SPLIT_Y - DEAD_Y);
+  bool isBot   = cy > (SPLIT_Y + DEAD_Y);
+
+  if (isLeft  && isTop) return TOP_LEFT;
+  if (isLeft  && isBot) return BOT_LEFT;
+  if (isRight && isTop) return TOP_RIGHT;
+  if (isRight && isBot) return BOT_RIGHT;
   return UNKNOWN;
 }
 
@@ -630,34 +665,47 @@ void runRectangleLap() {
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 1 → 45° ===");
-  executeTurn(45.0);
+  executeTurn(45.0 + offset1);
+  servoWrite(SERVO_NEUTRAL);   // ← release shoot after Turn 1
+
   waitMs(pause_ms);
 
   // SIDE 2 — time-based
   Serial.println("=== RECT: Side 2 @ 90° (time) ===");
-  executeDrive(breadth_pause, 90.0);
+  executeDrive(breadth_pause, 90.0 - offset2);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 2 → 135° ===");
-  executeTurn(135.0);
+  executeTurn(135.0  + offset1);
   waitMs(pause_ms);
 
   // SIDE 3 — TOF triggered, no shoot
   Serial.println("=== RECT: Side 3 @ 180° (TOF) ===");
-  executeDriveUntilClose(180.0, STOP_DISTANCE_CM_2, false);
+  executeDriveUntilClose((180.0), STOP_DISTANCE_CM_2, false);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 3 → -135° ===");
-  executeTurn(-135.0);
+  executeTurn(-135.0  + offset1);
   waitMs(pause_ms);
+
+
+  lap3Counter++;
+  int side4Duration = breadth_pause;
+  float side4Offset2 = offset2;           // ← add this
+  if (lap3Counter >= 3) {
+    side4Duration = 250;
+    side4Offset2  = 0.0;                  // ← zero offset2 on 3rd lap
+    lap3Counter = 0;
+    Serial.println("=== LAP 3 SPECIAL: Side 4 shortened + offset zeroed ===");
+  }
 
   // SIDE 4 — time-based
   Serial.println("=== RECT: Side 4 @ -90° (time) ===");
-  executeDrive(breadth_pause, -90.0);
+  executeDrive(side4Duration, (-90.0 - side4Offset2));
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 4 → -45° ===");
-  executeTurn(-45.0);
+  executeTurn(-45.0  + offset1);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Lap complete ===");
@@ -682,34 +730,48 @@ void runRectangleLapFromSide3() {
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 3 → -135° ===");
-  executeTurn(-135.0);
+  executeTurn(-135.0 + offset1);
   waitMs(pause_ms);
+
+  lap3Counter++;
+  int side4Duration = breadth_pause;
+  float side4Offset2 = offset2;           // ← add this
+  if (lap3Counter >= 3) {
+    side4Duration = 200;
+    side4Offset2  = 0.0;                  // ← zero offset2 on 3rd lap
+    lap3Counter = 0;
+    Serial.println("=== LAP 3 SPECIAL: Side 4 shortened + offset zeroed ===");
+  }
+
+
 
   // SIDE 4 — time-based
   Serial.println("=== RECT(S3): Side 4 @ -90° (time) ===");
-  executeDrive(breadth_pause, -90.0);
+  executeDrive(side4Duration, -90.0- side4Offset2);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 4 → -45° ===");
-  executeTurn(-45.0);
+  executeTurn(-45.0 + offset1);
   waitMs(pause_ms);
 
   // SIDE 1 — TOF triggered, shoot midway
   Serial.println("=== RECT(S3): Side 1 @ 0° (TOF + shoot midway) ===");
-  executeDriveUntilClose(0.0, STOP_DISTANCE_CM, true);
+  executeDriveUntilClose(0.0- offset2, STOP_DISTANCE_CM, true);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 1 → 45° ===");
-  executeTurn(45.0);
+  executeTurn(45.0 + offset1);
+  servoWrite(SERVO_NEUTRAL);   // ← release shoot after Turn 1
+
   waitMs(pause_ms);
 
   // SIDE 2 — time-based
   Serial.println("=== RECT(S3): Side 2 @ 90° (time) ===");
-  executeDrive(breadth_pause, 90.0);
+  executeDrive(breadth_pause, 90.0- offset2);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 2 → 135° ===");
-  executeTurn(135.0);
+  executeTurn(135.0 + offset1);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Lap complete ===");
@@ -758,23 +820,12 @@ void executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMid
     }
 
     // Non-blocking shoot state machine
-    if (shootMidway && !shootDone) {
-      if (!shootTriggered && (now - startTime >= 600)) {
-        Serial.println("Mid-drive SHOOT triggered");
-        servoWrite(SERVO_SHOOT);
-        shootTriggered = true;
-        shootStartTime = now;
-        shootPhase = 1;
-      }
-      if (shootPhase == 1 && (now - shootStartTime >= 250)) {
-        servoWrite(SERVO_NEUTRAL);
-        shootPhase = 2;
-      }
-      if (shootPhase == 2 && (now - shootStartTime >= 500)) {
-        shootDone = true;
-        Serial.println("Mid-drive SHOOT complete");
-      }
-    }
+// Non-blocking shoot — fire and hold until Turn 1
+if (shootMidway && !shootTriggered && (now - startTime >= 600)) {
+  Serial.println("Mid-drive SHOOT triggered — holding until Turn 1");
+  servoWrite(SERVO_SHOOT);
+  shootTriggered = true;
+}
 
     if (now - lastPIDTime >= FWD_INTERVAL) {
       lastPIDTime = now;

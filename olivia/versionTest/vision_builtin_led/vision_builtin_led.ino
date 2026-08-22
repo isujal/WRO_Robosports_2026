@@ -11,7 +11,7 @@
 #define DEAD_Y       5
 
 // ── Hardware ─────────────────────────────────────────────────
-#define LED_PIN      48
+#define LED_PIN      37
 #define TOGGLE_PIN   20
 
 Pixy2SPI_SS pixy;

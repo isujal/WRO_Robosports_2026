@@ -8,7 +8,7 @@
 
 Pixy2SPI_SS pixy;
 
-#define SIG2_MIN_AREA   200    // min purple blob area to accept
+#define SIG2_MIN_AREA   100    // min purple blob area to accept
 #define SAMPLE_COUNT    20     // samples averaged per position
 
 // Recorded positions — order: BOT_LEFT, BOT_RIGHT, TOP_LEFT, TOP_RIGHT
@@ -27,6 +27,7 @@ bool readBestSig2(int &cx, int &cy) {
   for (int i = 0; i < pixy.ccc.numBlocks; i++) {
     auto &b = pixy.ccc.blocks[i];
     if (b.m_signature != 2) continue;
+    if (b.m_y < 40) continue;          // ← add this (ROI_TOP_Y filter)
     uint32_t area = (uint32_t)b.m_width * b.m_height;
     if (area < SIG2_MIN_AREA || area <= bestArea) continue;
     bestArea = area;
