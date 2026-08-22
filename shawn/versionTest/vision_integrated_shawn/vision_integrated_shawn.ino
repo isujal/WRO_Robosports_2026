@@ -726,7 +726,7 @@ void runRectangleLapFromSide3() {
 
   // SIDE 3 — TOF triggered, no shoot (entering mid-rect)
   Serial.println("=== RECT(S3): Side 3 @ 180° (TOF) ===");
-  executeDriveUntilClose(180.0, STOP_DISTANCE_CM, false);
+  executeDriveUntilClose(180.0, STOP_DISTANCE_CM_2, false);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 3 → -135° ===");
