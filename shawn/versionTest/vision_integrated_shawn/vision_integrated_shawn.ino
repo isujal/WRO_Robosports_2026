@@ -77,6 +77,11 @@ int         pause_ms         = 50;
 #define PIXY_SAMPLE_MS    1500
 
 
+  // #define SPLIT_X   191
+  // #define SPLIT_Y   89
+  // #define DEAD_X    16
+  // #define DEAD_Y    3
+
 #define SPLIT_X   203
   #define SPLIT_Y   93
   #define DEAD_X    11

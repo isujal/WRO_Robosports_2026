@@ -7,7 +7,7 @@
 #define LED_PIN   37
 #define NUM_LEDS  1
 CRGB leds[NUM_LEDS];
-
+int lap3Counter = 0;   // counts laps; every 3rd lap uses shorter breadth_pause for Side 4
 
 // ============================================================
 //  ★ TUNE THESE ★
@@ -22,7 +22,7 @@ const int           T1_SPEED     = 180;
 
 // --- Trajectory 2 (Top-Left: Orange → Purple) ---
 const unsigned long T2_PHASE1_MS = 400;
-const unsigned long T2_PHASE2_MS = 300;
+const unsigned long T2_PHASE2_MS = 400;
 const int           T2_SPEED     = 180;
 
 // --- Trajectory 3 (Bot-Right: 60° turn + T1 logic + realign) ---
@@ -55,17 +55,17 @@ int         pause_ms           = 50;
 #define SIG_PURPLE        2
 #define MIN_AREA          200
 #define ROI_TOP_Y         55
-#define SPLIT_X           210
-#define SPLIT_Y           79        // ★ TUNED from actual mat readings
-#define DEAD_X            10        // ★ TUNED
-#define DEAD_Y            2         // ★ TUNED
+// #define SPLIT_X           210
+// #define SPLIT_Y           79        // ★ TUNED from actual mat readings
+// #define DEAD_X            10        // ★ TUNED
+// #define DEAD_Y            2         // ★ TUNED
 #define PIXY_SAMPLE_MS    1500
 
 
-  // #define SPLIT_X   222
-  // #define SPLIT_Y   90
-  // #define DEAD_X    15
-  // #define DEAD_Y    3
+  #define SPLIT_X   215
+  #define SPLIT_Y   89
+  #define DEAD_X    21
+  #define DEAD_Y    4
 
 // --- Referee start toggle switch ---
 #define SWITCH_PWR              48
@@ -294,9 +294,9 @@ void runMission(Zone z) {
     while (true) { runRectangleLap(); }
 
   } else {
-    // UNKNOWN → fallback same as BOT_LEFT
-    runTrajectory1();
-    runRectangleLapFromTurn1();
+    // // UNKNOWN → fallback same as BOT_LEFT
+    // runTrajectory1();
+    // runRectangleLapFromTurn1();
     while (true) { runRectangleLap(); }
   }
 }
@@ -535,8 +535,16 @@ void runRectangleLap() {
   executeTurn(135.0);
   waitMs(pause_ms);
 
+    lap3Counter++;                          // ← increment here
+  int side4Duration = breadth_pause;      // default
+  if (lap3Counter >= 3) {
+    side4Duration = 200;                  // shorter on every 3rd lap
+    lap3Counter = 0;                      // reset counter
+    Serial.println("=== LAP 3 SPECIAL: Side 4 shortened ===");
+  }
+
   Serial.println("=== RECT: Side 4 @ 90° (time) ===");
-  executeDrive(breadth_pause, 90.0);
+  executeDrive(side4Duration, 90.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 4 → 45° ===");
@@ -577,8 +585,16 @@ void runRectangleLapFromTurn1() {
   executeTurn(135.0);
   waitMs(pause_ms);
 
+    lap3Counter++;                          // ← increment here
+  int side4Duration = breadth_pause;      // default
+  if (lap3Counter >= 3) {
+    side4Duration = 200;                  // shorter on every 3rd lap
+    lap3Counter = 0;                      // reset counter
+    Serial.println("=== LAP 3 SPECIAL: Side 4 shortened ===");
+  }
+
   Serial.println("=== RECT(T1): Side 4 @ 90° (time) ===");
-  executeDrive(breadth_pause, 90.0);
+  executeDrive(side4Duration, 90.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T1): Turn 4 → 45° ===");
