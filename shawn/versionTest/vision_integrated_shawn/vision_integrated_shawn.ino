@@ -22,10 +22,12 @@
 #define NUM_LEDS  1
 CRGB leds[NUM_LEDS];
 // Zone decidedZone = UNKNOWN;
-
+float driftCorrection = 0.0;  // subtracted from heading every 2 laps
 float offset1 = 15;
 float offset2 = 5;
 int lap3Counter = 0;   // counts laps; every 3rd lap uses shorter breadth_pause for Side 4
+int   lapCounter     = 0;    // counts laps for heading drift correction
+
 // --- Referee start toggle switch ---
 #define SWITCH_PWR              48
 #define SWITCH_SIG              47
@@ -60,7 +62,7 @@ const unsigned long T4_PHASE2_MS = 400;
 const int           T4_SPEED     = 180;
 
 // --- Rectangle ---
-const float STOP_DISTANCE_CM = 15.0;
+const float STOP_DISTANCE_CM = 14.0;
 const float STOP_DISTANCE_CM_2 = 6.0;
 int         breadth_pause    = 650;
 int         pause_ms         = 50;
@@ -83,7 +85,7 @@ int         pause_ms         = 50;
   // #define DEAD_Y    3
 
 #define SPLIT_X   203
-  #define SPLIT_Y   93
+  #define SPLIT_Y   89
   #define DEAD_X    11
   #define DEAD_Y    3
 
@@ -208,7 +210,7 @@ void setLedForZone(Zone z) {
     case BOT_LEFT:  leds[0] = CRGB(255,   0,   0); break;  // Red
     case TOP_LEFT:  leds[0] = CRGB(  0, 255,   0); break;  // Green
     case BOT_RIGHT: leds[0] = CRGB(255, 100,   0); break;  // Orange
-    case TOP_RIGHT: leds[0] = CRGB(148,   0, 211); break;  // Purple
+    case TOP_RIGHT: leds[0] = CRGB(0, 0, 180); break;  // Dark Blue
     default:        leds[0] = CRGB(255, 255, 255); break;  // White = UNKNOWN
   }
   FastLED.show();
@@ -239,11 +241,11 @@ void setup() {
   Serial.println("All hardware ready. Sampling Pixy2...");
   delay(500);
   zeroIMU();           // second zero
-  decidedZone = detectPurpleBall();   // ← sample FIRST
+  decidedZone = UNKNOWN;   // ← sample FIRST
   Serial.print("=== ZONE LOCKED: ");
   Serial.println(decidedZone);
 
-  setLedForZone(decidedZone);        // ← LED ON after detection, during wait
+  setLedForZone(UNKNOWN);        // ← LED ON after detection, during wait
 
   waitForStartSwitch();
 
@@ -313,6 +315,23 @@ Zone classifyZone(int cx, int cy) {
   if (isRight && isTop) return TOP_RIGHT;
   if (isRight && isBot) return BOT_RIGHT;
   return UNKNOWN;
+}
+
+Zone samplePurpleOnce() {
+    pixy.ccc.getBlocks();
+    uint32_t bestArea = 0;
+    int bestCx = 0, bestCy = 0;
+    bool found = false;
+    for (int i = 0; i < pixy.ccc.numBlocks; i++) {
+        auto &b = pixy.ccc.blocks[i];
+        if (b.m_signature != SIG_PURPLE) continue;
+        if (b.m_y < ROI_TOP_Y) continue;
+        uint32_t area = (uint32_t)b.m_width * b.m_height;
+        if (area < MIN_AREA) continue;
+        if (area > bestArea) { bestArea = area; bestCx = b.m_x; bestCy = b.m_y; found = true; }
+    }
+    if (found) return classifyZone(bestCx, bestCy);
+    return UNKNOWN;
 }
 
 // ============================================================
@@ -673,6 +692,13 @@ void runRectangleLap() {
   executeTurn(45.0 + offset1);
   servoWrite(SERVO_NEUTRAL);   // ← release shoot after Turn 1
 
+  lapCounter++;
+if (lapCounter >= 2) {
+  driftCorrection += 1.0;
+  lapCounter = 0;
+  Serial.print("=== DRIFT CORRECTION: "); Serial.println(driftCorrection, 1);
+}
+
   waitMs(pause_ms);
 
   // SIDE 2 — time-based
@@ -767,7 +793,12 @@ void runRectangleLapFromSide3() {
   Serial.println("=== RECT(S3): Turn 1 → 45° ===");
   executeTurn(45.0 + offset1);
   servoWrite(SERVO_NEUTRAL);   // ← release shoot after Turn 1
-
+lapCounter++;
+if (lapCounter >= 2) {
+  driftCorrection += 1.0;
+  lapCounter = 0;
+  Serial.print("=== DRIFT CORRECTION: "); Serial.println(driftCorrection, 1);
+}
   waitMs(pause_ms);
 
   // SIDE 2 — time-based
@@ -989,23 +1020,45 @@ bool isStartSwitchOn() {
 }
 
 void waitForStartSwitch() {
-  Serial.println("=== Waiting for REFEREE START ===");
+  Serial.println("=== Waiting for REFEREE START (live tracking active) ===");
   int stableHighCount = 0;
-  unsigned long lastPrint = millis();
+  unsigned long lastPixySample = 0;
+  unsigned long lastPrint      = millis();
+
   while (true) {
+    unsigned long now = millis();
+
+    // ── Live Pixy tracking every 50ms ──────────────────────
+    if (now - lastPixySample >= 150) {
+      lastPixySample = now;
+      Zone detected  = samplePurpleOnce();
+      decidedZone    = detected;        // always overwrite — UNKNOWN = white
+      setLedForZone(decidedZone);
+    }
+
+    // ── Switch debounce ─────────────────────────────────────
     if (isStartSwitchOn()) {
       stableHighCount++;
       if (stableHighCount >= SWITCH_DEBOUNCE_READS) {
-        Serial.println("=== START SIGNAL RECEIVED — GO! ===");
+        Serial.print("=== START — Zone locked: ");
+        switch (decidedZone) {
+          case TOP_LEFT:  Serial.println("TOP-LEFT ===");  break;
+          case BOT_LEFT:  Serial.println("BOT-LEFT ===");  break;
+          case TOP_RIGHT: Serial.println("TOP-RIGHT ==="); break;
+          case BOT_RIGHT: Serial.println("BOT-RIGHT ==="); break;
+          default:        Serial.println("UNKNOWN ===");   break;
+        }
         return;
       }
     } else {
       stableHighCount = 0;
     }
-    if (millis() - lastPrint >= 1000) {
-      lastPrint = millis();
+
+    if (now - lastPrint >= 2000) {
+      lastPrint = now;
       Serial.println("... waiting for start switch ...");
     }
+
     delay(SWITCH_POLL_MS);
   }
 }
@@ -1085,9 +1138,7 @@ float getRawYaw() {
   }
 }
 
-float getHeading() {
-  return wrapAngle(getRawYaw() - yawOffset);
-}
+float getHeading() { return wrapAngle(getRawYaw() - yawOffset - driftCorrection); }
 
 float shortestError(float targetDeg, float currentDeg) {
   float error = wrapAngle(targetDeg) - wrapAngle(currentDeg);

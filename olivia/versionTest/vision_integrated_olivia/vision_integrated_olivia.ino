@@ -94,6 +94,7 @@ const int M2B = 16;
 const int INTAKE_IN1   = 38;
 const int INTAKE_IN2   = 39;
 const int INTAKE_SPEED = 255;
+const int SLOW = 120;
 
 #define SERVO_PIN 40
 constexpr uint32_t SERVO_PWM_FREQ = 50;
@@ -171,7 +172,7 @@ void  runRectangleLapFromSide3();
 
 void  executeDrive(unsigned long durationMs, float targetHeading);
 void  executeDriveUntilPixy(float targetHeading, bool shootMidway, bool useFullSpeedPhase);
-void  executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMidway);
+void  executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMidway, bool reverseIntakeAtStart = false);
 void  executeTurn(float targetAngle, bool shootDuringTurn = false);
 void  runForwardPID(float targetHeading, float &prevErr, float &integ, int baseSpeed);
 void  runTurnPID(float targetAngle, float &prevErr, float &integ);
@@ -209,7 +210,7 @@ void setLedForZone(Zone z) {
     case BOT_LEFT:  leds[0] = CRGB(255,   0,   0); break;  // Red
     case TOP_LEFT:  leds[0] = CRGB(  0, 255,   0); break;  // Green
     case BOT_RIGHT: leds[0] = CRGB(255, 100,   0); break;  // Orange
-    case TOP_RIGHT: leds[0] = CRGB(148,   0, 211); break;  // Purple
+    case TOP_RIGHT: leds[0] = CRGB(0, 0, 180); break;  // Dark Blue
     default:        leds[0] = CRGB(255, 255, 255); break;  // White = UNKNOWN
   }
   FastLED.show();
@@ -241,7 +242,7 @@ void setup() {
   delay(500);
   zeroIMU();
 
-  decidedZone = detectPurpleBall();
+  decidedZone = UNKNOWN;
   Serial.print("=== TRAJECTORY DECISION LOCKED IN: ");
   switch (decidedZone) {
     case TOP_LEFT:  Serial.println("TOP-LEFT ===");  break;
@@ -251,7 +252,7 @@ void setup() {
     default:        Serial.println("UNKNOWN ===");   break;
   }
 
-  setLedForZone(decidedZone);    // ← LED ON after detection, during wait
+  setLedForZone(UNKNOWN);    // ← LED ON after detection, during wait
 
   waitForStartSwitch();
 
@@ -317,27 +318,65 @@ bool isStartSwitchOn() {
 }
 
 void waitForStartSwitch() {
-  Serial.println("=== Waiting for REFEREE START ===");
+  Serial.println("=== Waiting for REFEREE START (live tracking active) ===");
   int stableHighCount = 0;
-  unsigned long lastPrint = millis();
+  unsigned long lastPixySample = 0;
+  unsigned long lastPrint      = millis();
+
   while (true) {
+    unsigned long now = millis();
+
+    // ── Live Pixy tracking every 50ms ──────────────────────
+    if (now - lastPixySample >= 150) {
+      lastPixySample = now;
+      Zone detected  = samplePurpleOnce();
+      decidedZone    = detected;        // always overwrite — UNKNOWN = white
+      setLedForZone(decidedZone);
+    }
+
+    // ── Switch debounce ─────────────────────────────────────
     if (isStartSwitchOn()) {
       stableHighCount++;
       if (stableHighCount >= SWITCH_DEBOUNCE_READS) {
-        Serial.println("=== START SIGNAL RECEIVED — GO! ===");
+        Serial.print("=== START — Zone locked: ");
+        switch (decidedZone) {
+          case TOP_LEFT:  Serial.println("TOP-LEFT ===");  break;
+          case BOT_LEFT:  Serial.println("BOT-LEFT ===");  break;
+          case TOP_RIGHT: Serial.println("TOP-RIGHT ==="); break;
+          case BOT_RIGHT: Serial.println("BOT-RIGHT ==="); break;
+          default:        Serial.println("UNKNOWN ===");   break;
+        }
         return;
       }
     } else {
       stableHighCount = 0;
     }
-    if (millis() - lastPrint >= 1000) {
-      lastPrint = millis();
+
+    if (now - lastPrint >= 2000) {
+      lastPrint = now;
       Serial.println("... waiting for start switch ...");
     }
+
     delay(SWITCH_POLL_MS);
   }
 }
 
+Zone samplePurpleOnce() {
+    pixy.ccc.getBlocks();
+    uint32_t bestArea = 0;
+    int bestCx = 0, bestCy = 0;
+    bool found = false;
+    for (int i = 0; i < pixy.ccc.numBlocks; i++) {
+        auto &b = pixy.ccc.blocks[i];
+        if (b.m_signature != SIG_PURPLE) continue;
+        if (b.m_y < ROI_TOP_Y) continue;
+        uint32_t area = (uint32_t)b.m_width * b.m_height;
+        if (area < MIN_AREA) continue;
+        if (area > bestArea) { bestArea = area; bestCx = b.m_x; bestCy = b.m_y; found = true; }
+    }
+    if (found) return classifyZone(bestCx, bestCy);
+    return UNKNOWN;
+}
 // ============================================================
 //  detectPurpleBall()
 // ============================================================
@@ -529,7 +568,7 @@ if (lapCounter >= 2) {
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Side 2 @ -90° (time) ===");
-  executeDrive(breadth_pause, -80.0);
+  executeDrive(breadth_pause, -85.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 2 → -135° ===");
@@ -538,8 +577,7 @@ if (lapCounter >= 2) {
 
   // SIDE 3 — TOF, no shoot
   Serial.println("=== RECT: Side 3 @ 180° (TOF) ===");
-  executeDriveUntilClose(180.0, STOP_DISTANCE_CM, false);
-  waitMs(pause_ms);
+executeDriveUntilClose(180.0, STOP_DISTANCE_CM, false, true);  waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 3 → 135° ===");
   executeTurn(135.0);
@@ -589,7 +627,7 @@ if (lapCounter >= 2) {
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T1): Side 2 @ -90° (time) ===");
-  executeDrive(breadth_pause, -80.0);
+  executeDrive(breadth_pause, -85.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T1): Turn 2 → -135° ===");
@@ -598,8 +636,7 @@ if (lapCounter >= 2) {
 
   // SIDE 3 — TOF, no shoot
   Serial.println("=== RECT(T1): Side 3 @ 180° (TOF) ===");
-  executeDriveUntilClose(180.0, STOP_DISTANCE_CM, false);
-  waitMs(pause_ms);
+executeDriveUntilClose(180.0, STOP_DISTANCE_CM, false, true);  waitMs(pause_ms);
 
   Serial.println("=== RECT(T1): Turn 3 → 135° ===");
   executeTurn(135.0);
@@ -669,7 +706,7 @@ if (lapCounter >= 2) {
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T3): Side 2 @ -90° (time) ===");
-  executeDrive(breadth_pause, -80.0);
+  executeDrive(breadth_pause, -85.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T3): Turn 2 → -135° ===");
@@ -692,8 +729,7 @@ void runRectangleLapFromSide3() {
 
   // SIDE 3 — TOF, no shoot
   Serial.println("=== RECT(S3): Side 3 @ 180° (TOF) ===");
-  executeDriveUntilClose(180.0, STOP_DISTANCE_CM, false);
-  waitMs(pause_ms);
+executeDriveUntilClose(180.0, STOP_DISTANCE_CM, false, true);  waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 3 → 135° ===");
   executeTurn(135.0);
@@ -728,7 +764,7 @@ if (lapCounter >= 2) {
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Side 2 @ -90° (time) ===");
-  executeDrive(breadth_pause, -80.0);
+  executeDrive(breadth_pause, -85.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 2 → -135° ===");
@@ -861,12 +897,19 @@ void executeDrive(unsigned long durationMs, float targetHeading) {
 // ============================================================
 //  executeDriveUntilClose() — Side 3 (TOF)
 // ============================================================
-void executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMidway) {
+void executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMidway, bool reverseIntakeAtStart) {
   float prevErr = 0.0;
   float integ   = 0.0;
   unsigned long lastPIDTime  = millis();
   unsigned long startTime    = millis();
   const unsigned long MAX_TIMEOUT = 2000;
+
+  bool intakeSwitched = false;
+    bool servoShot       = false;          // ← ADD
+
+  if (reverseIntakeAtStart) intakeReverseSlowed();   // ← only when caller asks
+  else                      intakeOn();        // ← normal: keep forward
+
 
   bool shootDone      = false;
   bool shootTriggered = false;
@@ -875,10 +918,33 @@ void executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMid
 
   while (true) {
     unsigned long now = millis();
+    unsigned long elapsed = now - startTime;   // ← ADD
 
     if (now - startTime > MAX_TIMEOUT) {
       Serial.println("TOF: MAX TIMEOUT — stopping.");
       break;
+    }
+
+    //     if (!intakeSwitched && elapsed >= 250) {   // ← ADD
+    //   intakeOn();                               // ← ADD
+    //   intakeSwitched = true;                    // ← ADD
+    //   Serial.println("Side3: intake switched to forward"); // ← ADD
+    // }   
+
+
+        // ── Side3 servo shoot at 50ms ──────────────────────────
+    if (reverseIntakeAtStart && !servoShot && elapsed >= 50) {
+      servoWrite(SERVO_SHOOT);
+      servoShot = true;
+      Serial.println("Side3: servo SHOOT at 50ms");
+    }
+
+    // ── Side3 intake forward + servo neutral at 1000ms ─────
+    if (reverseIntakeAtStart && !intakeSwitched && elapsed >= 250) {
+      intakeOn();
+      servoWrite(SERVO_NEUTRAL);
+      intakeSwitched = true;
+      Serial.println("Side3: intake ON + servo NEUTRAL at 1000ms");
     }
 
     if (shootMidway && !shootDone) {
@@ -1052,7 +1118,7 @@ void initIntake() {
 
 void intakeOn()  { analogWrite(INTAKE_IN1, 0); analogWrite(INTAKE_IN2, INTAKE_SPEED); }
 void intakeReverse()  { analogWrite(INTAKE_IN1, INTAKE_SPEED); analogWrite(INTAKE_IN2, 0); }
-
+void intakeReverseSlowed()  { analogWrite(INTAKE_IN1, SLOW); analogWrite(INTAKE_IN2, 0); }
 void intakeOff() { analogWrite(INTAKE_IN1, 0); analogWrite(INTAKE_IN2, 0); }
 
 
