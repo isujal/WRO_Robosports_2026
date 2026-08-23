@@ -45,7 +45,7 @@ int         breadth_pause      = 500;
 int         pause_ms           = 50;
 
 // --- Pixy2 Sig3 stop (Side 1) ---
-#define SIG3_STOP_TOP_CY    117      // stop when filtered top_cy reaches this value
+#define SIG3_STOP_TOP_CY    150      // stop when filtered top_cy reaches this value
 #define SIG3_MIN_AREA       500     // ignore blobs smaller than this
 #define SIG3_EMA_ALPHA      0.7f    // EMA smoothing (lower = smoother)
 #define SIG3_TIMEOUT_MS     2500    // fallback timeout if sig3 never reaches target

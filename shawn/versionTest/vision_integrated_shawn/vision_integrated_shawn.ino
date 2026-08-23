@@ -38,7 +38,7 @@ int   lapCounter     = 0;    // counts laps for heading drift correction
 // ============================================================
 
 // --- Trajectory 1 (Bot-Left: Purple → Orange) ---
-const unsigned long T1_PHASE1_MS = 450;
+const unsigned long T1_PHASE1_MS = 470;
 const unsigned long T1_PHASE2_MS = 300;
 const unsigned long T1_PHASE3_MS = 200;
 const unsigned long T1_PAUSE_MS  = 200;
@@ -79,15 +79,15 @@ int         pause_ms         = 50;
 #define PIXY_SAMPLE_MS    1500
 
 
-  // #define SPLIT_X   191
-  // #define SPLIT_Y   89
-  // #define DEAD_X    16
-  // #define DEAD_Y    3
-
-#define SPLIT_X   203
-  #define SPLIT_Y   89
-  #define DEAD_X    11
+  #define SPLIT_X   200
+  #define SPLIT_Y   87
+  #define DEAD_X    15
   #define DEAD_Y    3
+
+// #define SPLIT_X   203
+//   #define SPLIT_Y   93
+//   #define DEAD_X    11
+//   #define DEAD_Y    3
 
 // ============================================================
 //  HARDWARE PINS
@@ -503,7 +503,7 @@ void runTrajectory2() {
 
   Serial.println("T2 S1: Servo → NEUTRAL");
   servoWrite(SERVO_SHOOT);
-  delay(250);
+  delay(100);
 
   Serial.println("T2 S2: Forward phase 1");
   executeDrive(T2_PHASE1_MS, 0.0);
