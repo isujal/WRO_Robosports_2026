@@ -8,7 +8,9 @@
 #define NUM_LEDS  1
 CRGB leds[NUM_LEDS];
 int lap3Counter = 0;   // counts laps; every 3rd lap uses shorter breadth_pause for Side 4
-
+int   lapCounter     = 0;    // counts laps for heading drift correction
+float headingOffset  = 0.0;  // added to all forward-drive headings every 5 laps
+float driftCorrection = 0.0;  // subtracted from heading every 2 laps
 // ============================================================
 //  ★ TUNE THESE ★
 // ============================================================
@@ -33,8 +35,8 @@ const unsigned long T3_PAUSE_MS  = 200;
 const int           T3_SPEED     = 180;
 
 // --- Trajectory 4 (Top-Right: 60° turn + T2 logic + realign) ---
-const unsigned long T4_PHASE1_MS = 400;
-const unsigned long T4_PHASE2_MS = 300;
+const unsigned long T4_PHASE1_MS = 450;
+const unsigned long T4_PHASE2_MS = 400;
 const int           T4_SPEED     = 180;
 
 // --- Rectangle ---
@@ -46,9 +48,9 @@ int         pause_ms           = 50;
 #define SIG3_STOP_TOP_CY    117      // stop when filtered top_cy reaches this value
 #define SIG3_MIN_AREA       500     // ignore blobs smaller than this
 #define SIG3_EMA_ALPHA      0.7f    // EMA smoothing (lower = smoother)
-#define SIG3_TIMEOUT_MS     4000    // fallback timeout if sig3 never reaches target
+#define SIG3_TIMEOUT_MS     2500    // fallback timeout if sig3 never reaches target
 #define SIG3_GUARD_MS       800     // minimum drive time before stop is allowed
-#define SIG3_FULLSPEED_MS   450     // drive at full speed before slowing for detection
+#define SIG3_FULLSPEED_MS   600     // drive at full speed before slowing for detection
 #define SIG3_FWD_SPEED      50     // detection speed for Side 1
 
 // --- Pixy2 zone detection ---
@@ -99,7 +101,7 @@ constexpr uint8_t  SERVO_PWM_RES  = 14;
 constexpr uint16_t SERVO_MIN_DUTY = (uint16_t)((500  * 16384L) / 20000);
 constexpr uint16_t SERVO_MAX_DUTY = (uint16_t)((2400 * 16384L) / 20000);
 
-const int SERVO_NEUTRAL = 10;
+const int SERVO_NEUTRAL = 30;
 const int SERVO_SHOOT   = 61;
 const int SERVO_LOAD    = 140;
 
@@ -112,7 +114,7 @@ const float FWD_KI          = 0.0;
 const float FWD_KD          = 0.5;
 const int   FWD_BASE_SPEED  = 220;
 const int   FWD_MAX_CORRECT = 120;   // 60 
-const float FWD_DEADBAND    = 1.5;
+const float FWD_DEADBAND    = 0.8;
 const int   FWD_INTERVAL    = 20;
 
 const float TRN_KP           = 8.0;
@@ -120,7 +122,7 @@ const float TRN_KI           = 0.0;
 const float TRN_KD           = 0.8;
 const int   TRN_MIN_SPEED    = 60;
 const int   TRN_MAX_SPEED    = 255;
-const float TRN_DEADBAND     = 8.0;
+const float TRN_DEADBAND     = 10.0;
 const int   TRN_INTERVAL     = 20;
 const int   TRN_STABLE_COUNT = 8;
 
@@ -170,8 +172,7 @@ void  runRectangleLapFromSide3();
 void  executeDrive(unsigned long durationMs, float targetHeading);
 void  executeDriveUntilPixy(float targetHeading, bool shootMidway, bool useFullSpeedPhase);
 void  executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMidway);
-void  executeTurn(float targetAngle);
-
+void  executeTurn(float targetAngle, bool shootDuringTurn = false);
 void  runForwardPID(float targetHeading, float &prevErr, float &integ, int baseSpeed);
 void  runTurnPID(float targetAngle, float &prevErr, float &integ);
 
@@ -453,7 +454,8 @@ void runTrajectory2() {
 
 void runTrajectory3() {
   Serial.println("=== TRAJECTORY 3 START ===");
-  executeTurn(30.0); waitMs(pause_ms);
+  executeTurn(30.0); 
+  waitMs(pause_ms);
     intakeOn();
   servoWrite(SERVO_LOAD);   delay(500);
   executeDrive(T3_PHASE1_MS, 30.0);
@@ -509,17 +511,25 @@ void runRectangleLap() {
   // SIDE 1 — Pixy sig3, shoot midway, full-speed phase ON
   Serial.println("=== RECT: Side 1 @ 0° (Pixy stop, shoot midway) ===");
   ema_init = false;
-  executeDriveUntilPixy(5.0, true, true);
+  executeDriveUntilPixy(10.0, true, true);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 1 → -45° ===");
-  executeTurn(-75.0);
+  executeTurn(-75.0, true);        // ← shoot fires as turn start;
+  intakeOn();              // resume forward
+
   servoWrite(SERVO_NEUTRAL);   // ← release shoot after Turn 1
+lapCounter++;
+if (lapCounter >= 2) {
+  driftCorrection += 1.2;
+  lapCounter = 0;
+  Serial.print("=== DRIFT CORRECTION: "); Serial.println(driftCorrection, 1);
+}
 
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Side 2 @ -90° (time) ===");
-  executeDrive(breadth_pause, -90.0);
+  executeDrive(breadth_pause, -80.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 2 → -135° ===");
@@ -544,7 +554,7 @@ void runRectangleLap() {
   }
 
   Serial.println("=== RECT: Side 4 @ 90° (time) ===");
-  executeDrive(side4Duration, 90.0);
+  executeDrive(side4Duration, 95.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 4 → 45° ===");
@@ -565,11 +575,21 @@ void runRectangleLapFromTurn1() {
   servoWrite(SERVO_NEUTRAL);
 
   Serial.println("=== RECT(T1): Turn 1 → -45° ===");
-  executeTurn(-75.0);
+  executeTurn(-75.0, true);        // ← shoot fires as turn start;
+  intakeOn();              // resume forward
+
+  servoWrite(SERVO_NEUTRAL);   // ← add this
+lapCounter++;
+if (lapCounter >= 2) {
+  driftCorrection += 1.2;
+  lapCounter = 0;
+  Serial.print("=== DRIFT CORRECTION: "); Serial.println(driftCorrection, 1);
+}
+
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T1): Side 2 @ -90° (time) ===");
-  executeDrive(breadth_pause, -90.0);
+  executeDrive(breadth_pause, -80.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T1): Turn 2 → -135° ===");
@@ -594,7 +614,7 @@ void runRectangleLapFromTurn1() {
   }
 
   Serial.println("=== RECT(T1): Side 4 @ 90° (time) ===");
-  executeDrive(side4Duration, 90.0);
+  executeDrive(side4Duration, 95.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T1): Turn 4 → 45° ===");
@@ -613,13 +633,15 @@ void runRectangleLapFromTurn1() {
 void runRectangleLapFromTurn3() {
   intakeOn();
   servoWrite(SERVO_NEUTRAL);
+    zeroIMU();    // ← re-zero here every lap, bot is always at 0° heading
+
 
   Serial.println("=== RECT(T3): Turn 3 → 135° ===");
   executeTurn(135.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T3): Side 4 @ 90° (time) ===");
-  executeDrive(breadth_pause, 90.0);
+  executeDrive(breadth_pause, 95.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T3): Turn 4 → 45° ===");
@@ -629,17 +651,25 @@ void runRectangleLapFromTurn3() {
   // SIDE 1 — Pixy sig3, shoot midway, full-speed phase ON
   Serial.println("=== RECT(T3): Side 1 @ 0° (Pixy stop, shoot midway) ===");
   ema_init = false;
-  executeDriveUntilPixy(5.0, true, true);
+  executeDriveUntilPixy(10.0, true, true);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T3): Turn 1 → -45° ===");
-  executeTurn(-75.0);
+  executeTurn(-75.0, true);        // ← shoot fires as turn start;
+  intakeOn();              // resume forward
+
   servoWrite(SERVO_NEUTRAL);   // ← release shoot after Turn 1
+lapCounter++;
+if (lapCounter >= 2) {
+  driftCorrection += 1.2;
+  lapCounter = 0;
+  Serial.print("=== DRIFT CORRECTION: "); Serial.println(driftCorrection, 1);
+}
 
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T3): Side 2 @ -90° (time) ===");
-  executeDrive(breadth_pause, -90.0);
+  executeDrive(breadth_pause, -80.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T3): Turn 2 → -135° ===");
@@ -657,6 +687,8 @@ void runRectangleLapFromTurn3() {
 void runRectangleLapFromSide3() {
   intakeOn();
   servoWrite(SERVO_NEUTRAL);
+    zeroIMU();    // ← re-zero here every lap, bot is always at 0° heading
+
 
   // SIDE 3 — TOF, no shoot
   Serial.println("=== RECT(S3): Side 3 @ 180° (TOF) ===");
@@ -668,7 +700,7 @@ void runRectangleLapFromSide3() {
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Side 4 @ 90° (time) ===");
-  executeDrive(breadth_pause, 90.0);
+  executeDrive(breadth_pause, 95.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 4 → 45° ===");
@@ -678,17 +710,25 @@ void runRectangleLapFromSide3() {
   // SIDE 1 — Pixy sig3, shoot midway, full-speed phase ON
   Serial.println("=== RECT(S3): Side 1 @ 0° (Pixy stop, shoot midway) ===");
   ema_init = false;
-  executeDriveUntilPixy(5.0, true, true);
+  executeDriveUntilPixy(10.0, true, true);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 1 → -45° ===");
-  executeTurn(-75.0);
+  executeTurn(-75.0, true);        // ← shoot fires as turn start;
+  intakeOn();              // resume forward
+
   servoWrite(SERVO_NEUTRAL);   // ← release shoot after Turn 1
+lapCounter++;
+if (lapCounter >= 2) {
+  driftCorrection += 1.2;
+  lapCounter = 0;
+  Serial.print("=== DRIFT CORRECTION: "); Serial.println(driftCorrection, 1);
+}
 
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Side 2 @ -90° (time) ===");
-  executeDrive(breadth_pause, -90.0);
+  executeDrive(breadth_pause, -80.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 2 → -135° ===");
@@ -734,7 +774,7 @@ void executeDriveUntilPixy(float targetHeading, bool shootMidway, bool useFullSp
 
     // ── Midway shoot state machine (non-blocking) ──────────
 // REPLACE the entire shoot state machine block with this:
-if (shootMidway && !shootTriggered && elapsed >= 1200) {
+if (shootMidway && !shootTriggered && elapsed >= 500) {
   Serial.println("Mid-drive SHOOT triggered — holding until Turn 1");
   servoWrite(SERVO_SHOOT);
   shootTriggered = true;
@@ -874,11 +914,15 @@ void executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMid
 // ============================================================
 //  executeTurn()
 // ============================================================
-void executeTurn(float targetAngle) {
-  float prevErr     = 0.0;
+void executeTurn(float targetAngle, bool shootDuringTurn) {  float prevErr     = 0.0;
   float integ       = 0.0;
   int   stableCount = 0;
   unsigned long lastPIDTime = millis();
+
+  if (shootDuringTurn) {
+    intakeReverse();            // ← revrses immediately as turn begins
+    Serial.println("SHOOT triggered during Turn 1");
+  }
 
   while (true) {
     unsigned long now = millis();
@@ -1007,7 +1051,11 @@ void initIntake() {
 }
 
 void intakeOn()  { analogWrite(INTAKE_IN1, 0); analogWrite(INTAKE_IN2, INTAKE_SPEED); }
+void intakeReverse()  { analogWrite(INTAKE_IN1, INTAKE_SPEED); analogWrite(INTAKE_IN2, 0); }
+
 void intakeOff() { analogWrite(INTAKE_IN1, 0); analogWrite(INTAKE_IN2, 0); }
+
+
 
 // ============================================================
 //  IMU
@@ -1044,7 +1092,7 @@ float getRawYaw() {
   }
 }
 
-float getHeading()                          { return wrapAngle(getRawYaw() - yawOffset); }
+float getHeading() { return wrapAngle(getRawYaw() - yawOffset - driftCorrection); }
 float shortestError(float target, float cur){ return wrapAngle(wrapAngle(target) - wrapAngle(cur)); }
 float wrapAngle(float a) {
   while (a >  180.0) a -= 360.0;

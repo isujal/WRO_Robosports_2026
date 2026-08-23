@@ -62,7 +62,7 @@ const int           T4_SPEED     = 180;
 // --- Rectangle ---
 const float STOP_DISTANCE_CM = 15.0;
 const float STOP_DISTANCE_CM_2 = 6.0;
-int         breadth_pause    = 500;
+int         breadth_pause    = 650;
 int         pause_ms         = 50;
 
 // --- Pixy2 zone detection ---
@@ -134,7 +134,7 @@ const float TRN_KI           = 0.0;
 const float TRN_KD           = 0.5;
 const int   TRN_MIN_SPEED    = 60;
 const int   TRN_MAX_SPEED    = 255;
-const float TRN_DEADBAND     = 8.0;
+const float TRN_DEADBAND     = 6.0;
 const int   TRN_INTERVAL     = 20;
 const int   TRN_STABLE_COUNT = 8;
 
@@ -698,8 +698,8 @@ void runRectangleLap() {
   int side4Duration = breadth_pause;
   float side4Offset2 = offset2;           // ← add this
   if (lap3Counter >= 3) {
-    side4Duration = 250;
-    side4Offset2  = 0.0;                  // ← zero offset2 on 3rd lap
+    side4Duration = 200;
+    side4Offset2  = -5.0;                  // ← zero offset2 on 3rd lap
     lap3Counter = 0;
     Serial.println("=== LAP 3 SPECIAL: Side 4 shortened + offset zeroed ===");
   }
@@ -743,7 +743,7 @@ void runRectangleLapFromSide3() {
   float side4Offset2 = offset2;           // ← add this
   if (lap3Counter >= 3) {
     side4Duration = 200;
-    side4Offset2  = 0.0;                  // ← zero offset2 on 3rd lap
+    side4Offset2  = -5.0;                  // ← zero offset2 on 3rd lap
     lap3Counter = 0;
     Serial.println("=== LAP 3 SPECIAL: Side 4 shortened + offset zeroed ===");
   }
