@@ -79,15 +79,16 @@ int         pause_ms         = 50;
 #define PIXY_SAMPLE_MS    1500
 
 
-  #define SPLIT_X   200
-  #define SPLIT_Y   87
-  #define DEAD_X    15
-  #define DEAD_Y    3
+  // #define SPLIT_X   200 //value changed - was too much to the left earlier
+  // #define SPLIT_Y   90  //value changed - was too much to the bottom earlier, verify and mak e up a bit
+  // #define DEAD_X    15
+  // #define DEAD_Y    3
 
-// #define SPLIT_X   203
-//   #define SPLIT_Y   93
-//   #define DEAD_X    11
-//   #define DEAD_Y    3
+#define SPLIT_X    189    // midpoint of 147 and 231
+#define SPLIT_Y     91    // midpoint of 80 and 102
+#define DEAD_X      20    // left cx≈147, right cx≈231, plenty of room
+#define DEAD_Y       4    // gap is only 22px, can't afford large dead zone
+
 
 // ============================================================
 //  HARDWARE PINS
@@ -323,15 +324,25 @@ Zone samplePurpleOnce() {
     int bestCx = 0, bestCy = 0;
     bool found = false;
     for (int i = 0; i < pixy.ccc.numBlocks; i++) {
+
+      
         auto &b = pixy.ccc.blocks[i];
         if (b.m_signature != SIG_PURPLE) continue;
         if (b.m_y < ROI_TOP_Y) continue;
         uint32_t area = (uint32_t)b.m_width * b.m_height;
         if (area < MIN_AREA) continue;
-        if (area > bestArea) { bestArea = area; bestCx = b.m_x; bestCy = b.m_y; found = true; }
+        if (area > bestArea) { bestArea = area; bestCx = b.m_x; bestCy = b.m_y; found = true;
+        
+            // Inside samplePurpleOnce() or your detection loop, print raw values:
+Serial.printf("sig=%d cx=%d cy=%d area=%d zone=%d\n",
+    b.m_signature, b.m_x, b.m_y,
+    b.m_width * b.m_height, (int)decidedZone); }
     }
     if (found) return classifyZone(bestCx, bestCy);
     return UNKNOWN;
+
+
+
 }
 
 // ============================================================
@@ -412,7 +423,7 @@ Zone detectPurpleBall() {
 
   // ── Pick winner ───────────────────────────────────────────
   int best = max({voteTL, voteBL, voteTR, voteBR});
-
+  Serial.println("Best: " + best);
   if (best == 0) {
     Serial.println("  RESULT: No valid detections → UNKNOWN");
     return UNKNOWN;
@@ -1050,15 +1061,31 @@ void waitForStartSwitch() {
   unsigned long lastPixySample = 0;
   unsigned long lastPrint      = millis();
 
+  Zone lastSeen        = UNKNOWN;
+  int  consecutiveCount = 0;
+  const int HYSTERESIS = 3;          // ← need 3 matching frames in a row
+
   while (true) {
     unsigned long now = millis();
 
     // ── Live Pixy tracking every 50ms ──────────────────────
-    if (now - lastPixySample >= 150) {
+    if (now - lastPixySample >= 20) {
       lastPixySample = now;
-      Zone detected  = samplePurpleOnce();
-      decidedZone    = detected;        // always overwrite — UNKNOWN = white
-      setLedForZone(decidedZone);
+      Zone detected = samplePurpleOnce();
+
+      if (detected != UNKNOWN) {
+        if (detected == lastSeen) {
+          consecutiveCount++;
+        } else {
+          lastSeen = detected;        // new zone — restart streak
+          consecutiveCount = 1;
+        }
+        if (consecutiveCount >= 1) { // 2 frames = 100ms — fast but filtered
+          decidedZone = detected;
+          setLedForZone(decidedZone);
+        }
+      }
+      // UNKNOWN frames: do nothing — don't reset streak, don't change LED
     }
 
     // ── Switch debounce ─────────────────────────────────────
@@ -1087,7 +1114,6 @@ void waitForStartSwitch() {
     delay(SWITCH_POLL_MS);
   }
 }
-
 // ============================================================
 //  SERVO
 // ============================================================

@@ -325,15 +325,31 @@ void waitForStartSwitch() {
   unsigned long lastPixySample = 0;
   unsigned long lastPrint      = millis();
 
+  Zone lastSeen        = UNKNOWN;
+  int  consecutiveCount = 0;
+  const int HYSTERESIS = 3;          // ← need 3 matching frames in a row
+
   while (true) {
     unsigned long now = millis();
 
     // ── Live Pixy tracking every 50ms ──────────────────────
-    if (now - lastPixySample >= 500) {
+    if (now - lastPixySample >= 20) {
       lastPixySample = now;
-      Zone detected  = samplePurpleOnce();
-      decidedZone    = detected;        // always overwrite — UNKNOWN = white
-      setLedForZone(decidedZone);
+      Zone detected = samplePurpleOnce();
+
+      if (detected != UNKNOWN) {
+        if (detected == lastSeen) {
+          consecutiveCount++;
+        } else {
+          lastSeen = detected;        // new zone — restart streak
+          consecutiveCount = 1;
+        }
+        if (consecutiveCount >= 1) { // 2 frames = 100ms — fast but filtered
+          decidedZone = detected;
+          setLedForZone(decidedZone);
+        }
+      }
+      // UNKNOWN frames: do nothing — don't reset streak, don't change LED
     }
 
     // ── Switch debounce ─────────────────────────────────────
