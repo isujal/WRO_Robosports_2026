@@ -10,8 +10,8 @@
 // ============================================================
 
 // ── ROBOT SELECTOR ──────────────────────────────────────────
-#define ROBOT_SHAWN       // <─ comment this out for OLIVIA
-// #define ROBOT_OLIVIA   // <─ uncomment this for OLIVIA
+// #define ROBOT_SHAWN       // <─ comment this out for OLIVIA
+#define ROBOT_OLIVIA   // <─ uncomment this for OLIVIA
 // ────────────────────────────────────────────────────────────
 
 #ifdef ROBOT_SHAWN
@@ -28,7 +28,7 @@
 
 Pixy2SPI_SS pixy;
 
-#define SAMPLE_COUNT    30        // samples averaged per position (more = more stable)
+#define SAMPLE_COUNT    100        // samples averaged per position (more = more stable)
 
 // Position order: TOP_LEFT=0, BOT_LEFT=1, TOP_RIGHT=2, BOT_RIGHT=3
 const char* LABELS[4]  = { "TOP_LEFT", "BOT_LEFT", "TOP_RIGHT", "BOT_RIGHT" };

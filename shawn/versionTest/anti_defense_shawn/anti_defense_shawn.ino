@@ -689,7 +689,7 @@ executeDriveUntilClose(0.0, STOP_DISTANCE_CM, true, true);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 1 → 45° ===");
-  // servoWrite(SERVO_SHOOT);     // ← shoot fires exactly at Turn 1 start
+  servoWrite(SERVO_SHOOT);     // ← shoot fires exactly at Turn 1 start
   executeTurn(45.0 + offset1);
   servoWrite(SERVO_NEUTRAL);   // ← release shoot after Turn 1
 
@@ -702,7 +702,7 @@ if (lapCounter >= 2) {
 
   waitMs(pause_ms);
 
-
+  
 
   // SIDE 2 — time-based
   Serial.println("=== RECT: Side 2 @ 90° (time) ===");
@@ -794,7 +794,7 @@ executeDriveUntilClose(0.0 - offset2, STOP_DISTANCE_CM, true, true);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 1 → 45° ===");
-  // servoWrite(SERVO_SHOOT);     // ← shoot fires exactly at Turn 1 start
+  servoWrite(SERVO_SHOOT);     // ← shoot fires exactly at Turn 1 start
 
   executeTurn(45.0 + offset1);
   servoWrite(SERVO_NEUTRAL);   // ← release shoot after Turn 1
@@ -847,10 +847,10 @@ void executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMid
   unsigned long startTime    = millis();
   const unsigned long MAX_TIMEOUT = 2000;
 
-  bool shootDone      = false;
-  bool shootTriggered = false;
-  unsigned long shootStartTime = 0;
-  int shootPhase = 0;
+  // bool shootDone      = false;
+  // bool shootTriggered = false;
+  // unsigned long shootStartTime = 0;
+  // int shootPhase = 0;
 
   bool intakeSwitched = false;
   bool servoShot      = false;
@@ -882,11 +882,11 @@ void executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMid
     }
     // Non-blocking shoot state machine
 // Non-blocking shoot — fire and hold until Turn 1
-if (shootMidway && !shootTriggered && (now - startTime >= 600)) {
-  Serial.println("Mid-drive SHOOT triggered — holding until Turn 1");
-  servoWrite(SERVO_SHOOT);
-  shootTriggered = true;
-}
+// if (shootMidway && !shootTriggered && (now - startTime >= 600)) {
+//   Serial.println("Mid-drive SHOOT triggered — holding until Turn 1");
+//   servoWrite(SERVO_SHOOT);
+//   shootTriggered = true;
+// }
 
     if (now - lastPIDTime >= FWD_INTERVAL) {
       lastPIDTime = now;

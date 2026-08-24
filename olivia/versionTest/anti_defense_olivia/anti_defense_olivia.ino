@@ -988,7 +988,7 @@ void executeTurn(float targetAngle, bool shootDuringTurn) {  float prevErr     =
   unsigned long lastPIDTime = millis();
 
   if (shootDuringTurn) {
-    intakeReverse();            // ← revrses immediately as turn begins
+  servoWrite(SERVO_SHOOT);    // shoot while turning
     Serial.println("SHOOT triggered during Turn 1");
   }
 
