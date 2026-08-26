@@ -128,6 +128,7 @@ const float FWD_KP          = 2.6;
 const float FWD_KI          = 0.0;
 const float FWD_KD          = 0.5;
 const int   FWD_BASE_SPEED  = 220;
+const int   FWD_BASE_SPEED_2  = 140;
 const int   FWD_MAX_CORRECT = 60;
 const float FWD_DEADBAND    = 1.5;
 const int   FWD_INTERVAL    = 20;
@@ -174,6 +175,8 @@ void  runRectangleLap();
 
 void  executeDrive(unsigned long durationMs, float targetHeading);
 void  executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMidway = false, bool reverseIntakeAtStart = false);
+// void  executeDriveUntilCloseSpeed(float targetHeading, float stopDistCm, bool shootMidway = false, bool reverseIntakeAtStart = false, const int speed);
+
 void  executeTurn(float targetAngle);
 
 void  runForwardPID(float targetHeading, float &prevErr, float &integ);
@@ -450,6 +453,7 @@ Zone detectPurpleBall() {
 //  9. Final SHOOT
 //  → Hands off to rectangle from Side 1 (heading 0°)
 // ============================================================
+
 void runTrajectory1() {
   Serial.println("=== TRAJECTORY 1 START (Bot-Left: Purple → Orange) ===");
 
@@ -696,6 +700,7 @@ void runRectangleLap() {
 
   // SIDE 1 — TOF triggered, shoot midway
   Serial.println("=== RECT: Side 1 @ 0° (TOF + shoot midway) ===");
+// executeDriveUntilClose(0.0, STOP_DISTANCE_CM, true, true);
 executeDriveUntilClose(0.0, STOP_DISTANCE_CM, true, true);
   waitMs(pause_ms);
 
@@ -717,7 +722,8 @@ if (lapCounter >= 2) {
 
   // SIDE 2 — time-based
   Serial.println("=== RECT: Side 2 @ 90° (time) ===");
-  executeDrive(breadth_pause, 90.0 - offset2);
+  executeDriveSpeed(breadth_pause, 90.0 - offset2, FWD_BASE_SPEED_2);
+  // executeDrive(breadth_pause, 90.0 - offset2);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 2 → 135° ===");
@@ -726,6 +732,7 @@ if (lapCounter >= 2) {
 
   // SIDE 3 — TOF triggered, no shoot
   Serial.println("=== RECT: Side 3 @ 180° (TOF) ===");
+  // executeDriveUntilClose((180.0), STOP_DISTANCE_CM_2, false);
   executeDriveUntilClose((180.0), STOP_DISTANCE_CM_2, false);
   waitMs(pause_ms);
 
@@ -746,7 +753,9 @@ if (lapCounter >= 2) {
 
   // SIDE 4 — time-based
   Serial.println("=== RECT: Side 4 @ -90° (time) ===");
-  executeDrive(side4Duration, (-90.0 - side4Offset2));
+    executeDriveSpeed(side4Duration, (-90.0 - side4Offset2),  FWD_BASE_SPEED_2);
+
+  // executeDrive(side4Duration, (-90.0 - side4Offset2));
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 4 → -45° ===");
@@ -792,7 +801,7 @@ void runRectangleLapFromSide3() {
 
   // SIDE 4 — time-based
   Serial.println("=== RECT(S3): Side 4 @ -90° (time) ===");
-  executeDrive(side4Duration, -90.0- side4Offset2);
+  executeDriveSpeed(side4Duration, -90.0- side4Offset2,FWD_BASE_SPEED_2);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 4 → -45° ===");
@@ -819,7 +828,7 @@ if (lapCounter >= 2) {
 
   // SIDE 2 — time-based
   Serial.println("=== RECT(S3): Side 2 @ 90° (time) ===");
-  executeDrive(breadth_pause, 90.0- offset2);
+  executeDriveSpeed(breadth_pause, 90.0- offset2,FWD_BASE_SPEED_2);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 2 → 135° ===");
@@ -921,6 +930,77 @@ if (shootMidway && !shootTriggered && (now - startTime >= 600)) {
   motorsStop();
 }
 
+
+void executeDriveUntilCloseSpeed(float targetHeading, float stopDistCm, bool shootMidway, bool reverseIntakeAtStart, const int speed) {
+    float prevErr = 0.0;
+  float integ   = 0.0;
+  unsigned long lastPIDTime  = millis();
+  unsigned long startTime    = millis();
+  const unsigned long MAX_TIMEOUT = 2000;
+
+  bool shootDone      = false;
+  bool shootTriggered = false;
+  unsigned long shootStartTime = 0;
+  int shootPhase = 0;
+
+  bool intakeSwitched = false;
+  bool servoShot      = false;
+
+  if (reverseIntakeAtStart) intakeReverseSlowed();
+  else                      intakeOn();
+
+  while (true) {
+    unsigned long now = millis();
+    unsigned long elapsed = now - startTime;    // ← ADD
+
+    if (now - startTime > MAX_TIMEOUT) {
+      Serial.println("TOF: MAX TIMEOUT — stopping.");
+      break;
+    }
+
+
+   // ── Slowed reverse timing ──────────────────────────────
+    if (reverseIntakeAtStart && !servoShot && elapsed >= 50) {
+      servoWrite(SERVO_SHOOT);
+      servoShot = true;
+      Serial.println("Side1: servo SHOOT at 50ms");
+    }
+    if (reverseIntakeAtStart && !intakeSwitched && elapsed >= 250) {
+      intakeOn();
+      servoWrite(SERVO_NEUTRAL);
+      intakeSwitched = true;
+      Serial.println("Side1: intake ON + servo NEUTRAL at 250ms");
+    }
+    // Non-blocking shoot state machine
+// Non-blocking shoot — fire and hold until Turn 1
+if (shootMidway && !shootTriggered && (now - startTime >= 600)) {
+  Serial.println("Mid-drive SHOOT triggered — holding until Turn 1");
+  servoWrite(SERVO_SHOOT);
+  shootTriggered = true;
+}
+
+    if (now - lastPIDTime >= FWD_INTERVAL) {
+      lastPIDTime = now;
+
+      float dist = getDistanceCm();
+      Serial.print("TOF | Dist:");
+      if (dist >= 0) { Serial.print(dist, 1); Serial.print("cm"); }
+      else             Serial.print("OOR");
+
+      if (dist > 0 && dist < stopDistCm) {
+        Serial.println(" → STOP");
+        motorsStop();
+        break;
+      }
+
+      Serial.println();
+      runForwardPIDSpeed(targetHeading, prevErr, integ, speed);
+    }
+  }
+
+  motorsStop();
+}
+
 // ============================================================
 //  executeTurn()
 // ============================================================
@@ -955,6 +1035,57 @@ void executeTurn(float targetAngle) {
       }
     }
   }
+}
+
+void executeDriveSpeed(unsigned long durationMs, float targetHeading, const int speed) {
+  float prevErr = 0.0;
+  float integ   = 0.0;
+  unsigned long startTime   = millis();
+  unsigned long lastPIDTime = millis();
+
+  while (millis() - startTime < durationMs) {
+    unsigned long now = millis();
+    if (now - lastPIDTime >= FWD_INTERVAL) {
+      lastPIDTime = now;
+      runForwardPIDSpeed(targetHeading, prevErr, integ, speed);
+    }
+  }
+  motorsStop();
+}
+
+
+void runForwardPIDSpeed(float targetHeading, float &prevErr, float &integ, const int speed) {
+  float heading = getHeading();
+  float error   = shortestError(targetHeading, heading);
+  float dt      = FWD_INTERVAL / 1000.0;
+
+  if (abs(error) <= FWD_DEADBAND) {
+    integ   = 0.0;
+    prevErr = error;
+    driveMotors(speed, speed);
+    Serial.print("FWD STRAIGHT | H:"); Serial.println(heading, 1);
+    return;
+  }
+
+  integ += error * dt;
+  integ  = constrain(integ, -50, 50);
+
+  float derivative = (error - prevErr) / dt;
+  prevErr = error;
+
+  float correction = (FWD_KP * error) + (FWD_KI * integ) + (FWD_KD * derivative);
+  correction = constrain(correction, -FWD_MAX_CORRECT, FWD_MAX_CORRECT);
+// correction to be updated for left and right --- leftspeed to be the highest and right speed to be [255 - 2(correction)]
+  int leftSpeed  = constrain(speed + (int)correction, 0, 255);
+  int rightSpeed = constrain(speed - (int)correction, 0, 255);
+
+  driveMotors(leftSpeed, rightSpeed);
+
+  Serial.print("FWD | H:"); Serial.print(heading, 1);
+  Serial.print(" E:"); Serial.print(error, 1);
+  Serial.print(" Corr:"); Serial.print(correction, 1);
+  Serial.print(" L:"); Serial.print(leftSpeed);
+  Serial.print(" R:"); Serial.println(rightSpeed);
 }
 
 // ============================================================

@@ -47,7 +47,7 @@ int         breadth_pause      = 500;
 int         pause_ms           = 50;
 
 // --- Pixy2 Sig3 stop (Side 1) ---
-#define SIG3_STOP_TOP_CY    155      // stop when filtered top_cy reaches this value  // SOHUM
+#define SIG3_STOP_TOP_CY    134      // stop when filtered top_cy reaches this value
 #define SIG3_MIN_AREA       500     // ignore blobs smaller than this
 #define SIG3_EMA_ALPHA      0.7f    // EMA smoothing (lower = smoother)
 #define SIG3_TIMEOUT_MS     2500    // fallback timeout if sig3 never reaches target
@@ -115,8 +115,7 @@ const int SERVO_LOAD    = 140;
 const float FWD_KP          = 2.6;
 const float FWD_KI          = 0.0;
 const float FWD_KD          = 0.5;
-const int   FWD_BASE_SPEED  = 220;  // 220
-const int   FWD_BASE_SPEED_2  = 150;
+const int   FWD_BASE_SPEED  = 220;
 const int   FWD_MAX_CORRECT = 120;   // 60 
 const float FWD_DEADBAND    = 0.8;
 const int   FWD_INTERVAL    = 20;
@@ -328,7 +327,7 @@ void waitForStartSwitch() {
 
   Zone lastSeen        = UNKNOWN;
   int  consecutiveCount = 0;
-  const int HYSTERESIS = 3;          // ← need 3 matching frames in a row        // SOHUM
+  const int HYSTERESIS = 3;          // ← need 3 matching frames in a row
 
   while (true) {
     unsigned long now = millis();
@@ -345,7 +344,7 @@ void waitForStartSwitch() {
           lastSeen = detected;        // new zone — restart streak
           consecutiveCount = 1;
         }
-        if (consecutiveCount >= 1) { // 2 frames = 100ms — fast but filtered       // SOHUM
+        if (consecutiveCount >= 1) { // 2 frames = 100ms — fast but filtered
           decidedZone = detected;
           setLedForZone(decidedZone);
         }
@@ -1031,8 +1030,6 @@ void executeTurn(float targetAngle, bool shootDuringTurn) {  float prevErr     =
     }
   }
 }
-
-
 
 // ============================================================
 //  runForwardPID()
