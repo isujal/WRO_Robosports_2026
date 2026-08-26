@@ -122,6 +122,7 @@ const int   FWD_INTERVAL    = 20;
 
 // --- Rectangle-lap-only slow speed (does NOT affect runTrajectory1-4) ---
 const int   RECT_SPEED      = 80;
+const int   RECT_SPEED_2      = 120;
 const unsigned long RECT_FULLSPEED_MS = 600; 
 
 const float TRN_KP           = 5.0;
@@ -624,7 +625,7 @@ executeDriveUntilCloseRect(180.0, STOP_DISTANCE_CM, false, true);  waitMs(pause_
   }
 
   Serial.println("=== RECT: Side 4 @ 90° (time) ===");
-  executeDriveRect(side4Duration, 95.0);
+  executeDriveRect(side4Duration, 100.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 4 → 45° ===");
@@ -1034,7 +1035,7 @@ void executeDriveRect(unsigned long durationMs, float targetHeading) {
     unsigned long now = millis();
     if (now - lastPIDTime >= FWD_INTERVAL) {
       lastPIDTime = now;
-      runForwardPID(targetHeading, prevErr, integ, RECT_SPEED);
+      runForwardPID(targetHeading, prevErr, integ, RECT_SPEED_2);
     }
   }
   motorsStop();
