@@ -718,7 +718,7 @@ void runRectangleLap() {
 
   // SIDE 1 — TOF triggered
   Serial.println("=== RECT: Side 1 @ 0° (TOF, slow) ===");
-  executeDriveUntilCloseSpeed(0.0, STOP_DISTANCE_CM, false, true, FWD_BASE_SPEED_2);
+  executeDriveUntilCloseSpeed(0.0, STOP_DISTANCE_CM, true, false, FWD_BASE_SPEED_2);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 1A → 30° ===");
@@ -755,7 +755,7 @@ if (lapCounter >= 2) {
 
   // SIDE 3 — TOF triggered, no shoot
   Serial.println("=== RECT: Side 3 @ 180° (TOF, slow) ===");
-  executeDriveUntilCloseSpeed(180.0, STOP_DISTANCE_CM_2, false, false, FWD_BASE_SPEED_2);
+  executeDriveUntilCloseSpeed(180.0, STOP_DISTANCE_CM_2, false, true, FWD_BASE_SPEED_2);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 3 → -135° ===");
@@ -804,7 +804,7 @@ void runRectangleLapFromSide3() {
 
   // SIDE 3 — TOF triggered, no shoot (entering mid-rect)
   Serial.println("=== RECT(S3): Side 3 @ 180° (TOF, slow) ===");
-  executeDriveUntilCloseSpeed(180.0, STOP_DISTANCE_CM_2, false, false, FWD_BASE_SPEED_2);
+  executeDriveUntilCloseSpeed(180.0, STOP_DISTANCE_CM_2, false, true, FWD_BASE_SPEED_2);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 3 → -135° ===");
@@ -834,7 +834,7 @@ void runRectangleLapFromSide3() {
 
   // SIDE 1 — TOF triggered
   Serial.println("=== RECT(S3): Side 1 @ 0° (TOF, slow) ===");
-  executeDriveUntilCloseSpeed(0.0 - offset2, STOP_DISTANCE_CM, false, true, FWD_BASE_SPEED_2);
+  executeDriveUntilCloseSpeed(0.0 - offset2, STOP_DISTANCE_CM, true, false, FWD_BASE_SPEED_2);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 1A → 30° ===");
