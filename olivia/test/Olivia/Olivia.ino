@@ -47,7 +47,7 @@ int         breadth_pause      = 1200;
 int         pause_ms           = 50;
 
 // --- Pixy2 Sig3 stop (Side 1) ---
-#define SIG3_STOP_TOP_CY    155      // stop when filtered top_cy reaches this value  // SOHUM
+#define SIG3_STOP_TOP_CY    160      // stop when filtered top_cy reaches this value  // SOHUM
 #define SIG3_MIN_AREA       500     // ignore blobs smaller than this
 #define SIG3_EMA_ALPHA      0.7f    // EMA smoothing (lower = smoother)
 #define SIG3_TIMEOUT_MS     3500    // fallback timeout if sig3 never reaches target
@@ -616,7 +616,7 @@ if (lapCounter >= 2) {
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 2 → -135° ===");
-  executeTurn(-135.0);
+  executeTurn(-145.0);
   waitMs(pause_ms);
 
   // SIDE 3 — TOF, no shoot
@@ -675,7 +675,7 @@ if (lapCounter >= 2) {
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T1): Turn 2 → -135° ===");
-  executeTurn(-135.0);
+  executeTurn(-145.0);
   waitMs(pause_ms);
 
   // SIDE 3 — TOF, no shoot
@@ -754,7 +754,7 @@ if (lapCounter >= 2) {
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T3): Turn 2 → -135° ===");
-  executeTurn(-135.0);
+  executeTurn(-145.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T3): First lap from Turn3 complete ===");
@@ -812,7 +812,7 @@ if (lapCounter >= 2) {
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 2 → -135° ===");
-  executeTurn(-135.0);
+  executeTurn(-145.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Lap complete ===");

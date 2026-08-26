@@ -28,7 +28,7 @@ float offset2 = 5;
 int lap3Counter = 0;   // counts laps; every 3rd lap uses shorter breadth_pause for Side 4
 int   lapCounter     = 0;    // counts laps for heading drift correction
 const int SLOW = 140;          // ← ADD
-const float SHOOT_HEADING_DEG = 40.0;
+const float SHOOT_HEADING_DEG = 35.0;
 // --- Referee start toggle switch ---
 #define SWITCH_PWR              48
 #define SWITCH_SIG              47
@@ -51,7 +51,7 @@ const unsigned long T2_PHASE2_MS = 400;
 const int           T2_SPEED     = 180;
 
 // --- Trajectory 3 (Bot-Right: 60° t    urn + T1 logic + realign) ---
-const unsigned long T3_PHASE1_MS = 480;
+const unsigned long T3_PHASE1_MS = 480; 
 const unsigned long T3_PHASE2_MS = 300;
 const unsigned long T3_PHASE3_MS = 200;
 const unsigned long T3_PAUSE_MS  = 200;
