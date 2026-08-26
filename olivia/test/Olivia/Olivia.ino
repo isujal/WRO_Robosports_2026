@@ -47,7 +47,7 @@ int         breadth_pause      = 1200;
 int         pause_ms           = 50;
 
 // --- Pixy2 Sig3 stop (Side 1) ---
-#define SIG3_STOP_TOP_CY    150      // stop when filtered top_cy reaches this value  // SOHUM
+#define SIG3_STOP_TOP_CY    155      // stop when filtered top_cy reaches this value  // SOHUM
 #define SIG3_MIN_AREA       500     // ignore blobs smaller than this
 #define SIG3_EMA_ALPHA      0.7f    // EMA smoothing (lower = smoother)
 #define SIG3_TIMEOUT_MS     3500    // fallback timeout if sig3 never reaches target
@@ -95,7 +95,7 @@ const int M2B = 16;
 
 const int INTAKE_IN1   = 38;
 const int INTAKE_IN2   = 39;
-const int INTAKE_SPEED = 255;
+const int INTAKE_SPEED = 235;
 const int SLOW = 120;
 
 #define SERVO_PIN 40
@@ -122,8 +122,8 @@ const int   FWD_INTERVAL    = 20;
 
 // --- Rectangle-lap-only slow speed (does NOT affect runTrajectory1-4) ---
 const int   RECT_SPEED      = 80;
-const int   RECT_SPEED_2      = 120;
-const unsigned long RECT_FULLSPEED_MS = 600; 
+const int   RECT_SPEED_2      = 90;
+const unsigned long RECT_FULLSPEED_MS = 500; 
 
 const float TRN_KP           = 5.0;
 const float TRN_KI           = 0.0;
@@ -336,9 +336,11 @@ void waitForStartSwitch() {
   unsigned long lastPixySample = 0;
   unsigned long lastPrint      = millis();
 
-  Zone lastSeen        = UNKNOWN;
+  Zone lastSeen         = UNKNOWN;
   int  consecutiveCount = 0;
-  const int HYSTERESIS = 3;          // ← need 3 matching frames in a row        // SOHUM
+  int  missCount        = 0;                 // ← ADD: tracks consecutive UNKNOWN frames
+  const int HYSTERESIS       = 2;            // frames needed to lock in a color
+  const int UNKNOWN_HYST     = 10;            // frames needed to revert to white // ← ADD
 
   while (true) {
     unsigned long now = millis();
@@ -349,18 +351,28 @@ void waitForStartSwitch() {
       Zone detected = samplePurpleOnce();
 
       if (detected != UNKNOWN) {
+        missCount = 0;                       // ← ADD: any real detection resets the miss streak
+
         if (detected == lastSeen) {
           consecutiveCount++;
         } else {
           lastSeen = detected;        // new zone — restart streak
           consecutiveCount = 1;
         }
-        if (consecutiveCount >= 1) { // 2 frames = 100ms — fast but filtered       // SOHUM
+        if (consecutiveCount >= HYSTERESIS) {   // ← CHANGED: was >= 1, now actually uses HYSTERESIS
           decidedZone = detected;
           setLedForZone(decidedZone);
         }
+      } else {
+        // ── UNKNOWN frame: count misses, revert to white after enough of them ──  // ← ADD block
+        missCount++;
+        consecutiveCount = 0;   // a miss breaks any in-progress color streak
+        lastSeen = UNKNOWN;
+        if (missCount >= UNKNOWN_HYST) {
+          decidedZone = UNKNOWN;
+          setLedForZone(UNKNOWN);   // ← white LED
+        }
       }
-      // UNKNOWN frames: do nothing — don't reset streak, don't change LED
     }
 
     // ── Switch debounce ─────────────────────────────────────
@@ -389,7 +401,6 @@ void waitForStartSwitch() {
     delay(SWITCH_POLL_MS);
   }
 }
-
 Zone samplePurpleOnce() {
     pixy.ccc.getBlocks();
     uint32_t bestArea = 0;
@@ -1171,7 +1182,7 @@ void executeDriveUntilCloseRect(float targetHeading, float stopDistCm, bool shoo
     }
 
     if (shootMidway && !shootDone) {
-      if (!shootTriggered && (now - startTime >= 600)) {
+      if (!shootTriggered && (now - startTime >= 500)) {
         servoWrite(SERVO_SHOOT);
         shootTriggered = true;
         shootStartTime = now;

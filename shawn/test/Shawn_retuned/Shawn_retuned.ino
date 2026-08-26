@@ -28,6 +28,17 @@ float offset2 = 5;
 int lap3Counter = 0;   // counts laps; every 3rd lap uses shorter breadth_pause for Side 4
 int   lapCounter     = 0;    // counts laps for heading drift correction
 const int SLOW = 140;          // ← ADD
+
+
+// ── EMA smoothing state for PURPLE ZONE cx/cy only ── ADD THESE 5 LINES
+float ema_cx = -1.0f;
+float ema_cy = -1.0f;
+bool  ema_zone_init = false;
+#define ZONE_EMA_ALPHA      0.5f
+#define ZONE_OUTLIER_JUMP   40
+
+
+
 // --- Referee start toggle switch ---
 #define SWITCH_PWR              48
 #define SWITCH_SIG              47
@@ -136,7 +147,7 @@ const int   FWD_BASE_SPEED_3  = 80; // RECTANGLE-ONLY slow speed — used for Si
 const unsigned long RECT_FULLSPEED_MS = 800; // Side1/Side3: run at FWD_BASE_SPEED for this long,
                                               // then drop to FWD_BASE_SPEED_2 until the TOF stops it
 const int   FWD_MAX_CORRECT = 60;
-const float FWD_DEADB AND    = 1.5;
+const float FWD_DEADBAND    = 1.5;
 const int   FWD_INTERVAL    = 20;
 
 const float TRN_KP           = 5.0;
@@ -307,7 +318,13 @@ void loop() {
     while (true) { runRectangleLap(); }
   }
 }
-
+struct ZoneCentroid { Zone z; float cx; float cy; };
+const ZoneCentroid ZONE_CENTROIDS[4] = {
+  { TOP_LEFT,  147, 60 },
+  { BOT_LEFT,  146, 83 },
+  { TOP_RIGHT, 240, 66 },
+  { BOT_RIGHT, 262, 88 },
+};
 // ============================================================
 //  detectPurpleBall()
 //  Samples Pixy2 for PIXY_SAMPLE_MS. Counts votes per zone.
@@ -320,44 +337,42 @@ void loop() {
 //  SPLIT_X=200  SPLIT_Y=77
 // ============================================================
 // ✅ FIXED — uses SPLIT_X, SPLIT_Y, DEAD_X, DEAD_Y
-Zone classifyZone(int cx, int cy) {
-  bool isLeft  = cx < (SPLIT_X - DEAD_X);
-  bool isRight = cx > (SPLIT_X + DEAD_X);
-  bool isTop   = cy < (SPLIT_Y - DEAD_Y);
-  bool isBot   = cy > (SPLIT_Y + DEAD_Y);
 
-  if (isLeft  && isTop) return TOP_LEFT;
-  if (isLeft  && isBot) return BOT_LEFT;
-  if (isRight && isTop) return TOP_RIGHT;
-  if (isRight && isBot) return BOT_RIGHT;
-  return UNKNOWN;
+Zone classifyZone(int cx, int cy) {
+  float bestDist = 1e9;
+  Zone  bestZone = UNKNOWN;
+  for (int i = 0; i < 4; i++) {
+    float dx = cx - ZONE_CENTROIDS[i].cx;
+    float dy = cy - ZONE_CENTROIDS[i].cy;
+    float dist = dx*dx + dy*dy;  // squared distance, no need for sqrt
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestZone = ZONE_CENTROIDS[i].z;
+    }
+  }
+  // Optional: reject if too far from ANY known centroid (likely garbage/noise)
+  const float MAX_DIST_SQ = 60.0f * 60.0f;  // tune this — reject if >60px from nearest centroid
+  if (bestDist > MAX_DIST_SQ) return UNKNOWN;
+
+  return bestZone;
 }
 
+// ↓↓↓ REPLACE THIS ENTIRE FUNCTION ↓↓↓
 Zone samplePurpleOnce() {
     pixy.ccc.getBlocks();
     uint32_t bestArea = 0;
     int bestCx = 0, bestCy = 0;
     bool found = false;
     for (int i = 0; i < pixy.ccc.numBlocks; i++) {
-
-      
         auto &b = pixy.ccc.blocks[i];
         if (b.m_signature != SIG_PURPLE) continue;
         if (b.m_y < ROI_TOP_Y) continue;
         uint32_t area = (uint32_t)b.m_width * b.m_height;
         if (area < MIN_AREA) continue;
-        if (area > bestArea) { bestArea = area; bestCx = b.m_x; bestCy = b.m_y; found = true;
-        
-            // Inside samplePurpleOnce() or your detection loop, print raw values:
-Serial.printf("sig=%d cx=%d cy=%d area=%d zone=%d\n",
-    b.m_signature, b.m_x, b.m_y,
-    b.m_width * b.m_height, (int)decidedZone); }
+        if (area > bestArea) { bestArea = area; bestCx = b.m_x; bestCy = b.m_y; found = true; }
     }
     if (found) return classifyZone(bestCx, bestCy);
     return UNKNOWN;
-
-
-
 }
 
 // ============================================================
@@ -1224,6 +1239,7 @@ void initStartSwitch() {
   Serial.println("Start switch ready.");
 }
 
+
 bool isStartSwitchOn() {
   return digitalRead(SWITCH_SIG) == HIGH;
 }
@@ -1234,9 +1250,11 @@ void waitForStartSwitch() {
   unsigned long lastPixySample = 0;
   unsigned long lastPrint      = millis();
 
-  Zone lastSeen        = UNKNOWN;
+  Zone lastSeen         = UNKNOWN;
   int  consecutiveCount = 0;
-  const int HYSTERESIS = 3;          // ← need 3 matching frames in a row
+  int  missCount        = 0;                 // ← ADD: tracks consecutive UNKNOWN frames
+  const int HYSTERESIS       = 2;            // frames needed to lock in a color
+  const int UNKNOWN_HYST     = 10;            // frames needed to revert to white // ← ADD
 
   while (true) {
     unsigned long now = millis();
@@ -1247,18 +1265,28 @@ void waitForStartSwitch() {
       Zone detected = samplePurpleOnce();
 
       if (detected != UNKNOWN) {
+        missCount = 0;                       // ← ADD: any real detection resets the miss streak
+
         if (detected == lastSeen) {
           consecutiveCount++;
         } else {
           lastSeen = detected;        // new zone — restart streak
           consecutiveCount = 1;
         }
-        if (consecutiveCount >= 1) { // 2 frames = 100ms — fast but filtered
+        if (consecutiveCount >= HYSTERESIS) {   // ← CHANGED: was >= 1, now actually uses HYSTERESIS
           decidedZone = detected;
           setLedForZone(decidedZone);
         }
+      } else {
+        // ── UNKNOWN frame: count misses, revert to white after enough of them ──  // ← ADD block
+        missCount++;
+        consecutiveCount = 0;   // a miss breaks any in-progress color streak
+        lastSeen = UNKNOWN;
+        if (missCount >= UNKNOWN_HYST) {
+          decidedZone = UNKNOWN;
+          setLedForZone(UNKNOWN);   // ← white LED
+        }
       }
-      // UNKNOWN frames: do nothing — don't reset streak, don't change LED
     }
 
     // ── Switch debounce ─────────────────────────────────────
@@ -1286,8 +1314,7 @@ void waitForStartSwitch() {
 
     delay(SWITCH_POLL_MS);
   }
-}
-// ============================================================
+}// ============================================================
 //  SERVO
 // ============================================================
 void initServo() {

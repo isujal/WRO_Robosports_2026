@@ -28,6 +28,7 @@ float offset2 = 5;
 int lap3Counter = 0;   // counts laps; every 3rd lap uses shorter breadth_pause for Side 4
 int   lapCounter     = 0;    // counts laps for heading drift correction
 const int SLOW = 140;          // ← ADD
+const float SHOOT_HEADING_DEG = 40.0;
 // --- Referee start toggle switch ---
 #define SWITCH_PWR              48
 #define SWITCH_SIG              47
@@ -705,7 +706,7 @@ void runTrajectory4() {
 //  Full rectangle lap starting from Side 1 (heading 0°).
 //  Used after Trajectory 1 and 2.
 //
-//  Side 1 → Turn1(30°) → Shoot → Turn1(90°) → Side2(90°) → Turn2(135°)
+//  Side 1 → Turn1(40°) → Shoot → Turn1(90°) → Side2(90°) → Turn2(135°)
 //  → Side3(180°) → Turn3(-135°) → Side4(-90°) → Turn4(-45°)
 //
 //  ALL FOUR SIDES run at FWD_BASE_SPEED_2 (140) via the *Speed
@@ -718,14 +719,14 @@ void runRectangleLap() {
 
   // SIDE 1 — TOF triggered
   Serial.println("=== RECT: Side 1 @ 0° (TOF, slow) ===");
-  executeDriveUntilCloseSpeed(0.0, STOP_DISTANCE_CM, true, false, FWD_BASE_SPEED_2);
+  executeDriveUntilCloseSpeed(0.0, STOP_DISTANCE_CM, false, true, FWD_BASE_SPEED_2);
   waitMs(pause_ms);
 
-  Serial.println("=== RECT: Turn 1A → 30° ===");
-  executeTurn(40.0);
+  Serial.println("=== RECT: Turn 1A → shoot heading ===");
+  executeTurn(SHOOT_HEADING_DEG);
   waitMs(pause_ms);
 
-  Serial.println("=== RECT: SHOOT @ 30° ===");
+  Serial.println("=== RECT: SHOOT @ shoot heading ===");
   servoWrite(SERVO_SHOOT);
   delay(250);
   servoWrite(SERVO_NEUTRAL);
@@ -755,7 +756,7 @@ if (lapCounter >= 2) {
 
   // SIDE 3 — TOF triggered, no shoot
   Serial.println("=== RECT: Side 3 @ 180° (TOF, slow) ===");
-  executeDriveUntilCloseSpeed(180.0, STOP_DISTANCE_CM_2, false, true, FWD_BASE_SPEED_2);
+  executeDriveUntilCloseSpeed(180.0, STOP_DISTANCE_CM_2, false, false, FWD_BASE_SPEED_2);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 3 → -135° ===");
@@ -792,7 +793,7 @@ if (lapCounter >= 2) {
 //  Used after Trajectory 3 and 4 — bot is already at 180°.
 //
 //  Side 3 → Turn3(-135°) → Side4(-90°) → Turn4(-45°)
-//  → Side1(0°) → Turn1(30°) → Shoot → Turn1(90°) → Side2(90°) → Turn2(135°)
+//  → Side1(0°) → Turn1(40°) → Shoot → Turn1(90°) → Side2(90°) → Turn2(135°)
 //
 //  ALL FOUR SIDES run at FWD_BASE_SPEED_2 (140) via the *Speed
 //  functions. Turns are unaffected (PID-driven off heading error).
@@ -804,7 +805,7 @@ void runRectangleLapFromSide3() {
 
   // SIDE 3 — TOF triggered, no shoot (entering mid-rect)
   Serial.println("=== RECT(S3): Side 3 @ 180° (TOF, slow) ===");
-  executeDriveUntilCloseSpeed(180.0, STOP_DISTANCE_CM_2, false, true, FWD_BASE_SPEED_2);
+  executeDriveUntilCloseSpeed(180.0, STOP_DISTANCE_CM_2, false, false, FWD_BASE_SPEED_2);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 3 → -135° ===");
@@ -834,14 +835,14 @@ void runRectangleLapFromSide3() {
 
   // SIDE 1 — TOF triggered
   Serial.println("=== RECT(S3): Side 1 @ 0° (TOF, slow) ===");
-  executeDriveUntilCloseSpeed(0.0 - offset2, STOP_DISTANCE_CM, true, false, FWD_BASE_SPEED_2);
+  executeDriveUntilCloseSpeed(0.0 - offset2, STOP_DISTANCE_CM, false, true, FWD_BASE_SPEED_2);
   waitMs(pause_ms);
 
-  Serial.println("=== RECT(S3): Turn 1A → 30° ===");
-  executeTurn(40.0);
+  Serial.println("=== RECT(S3): Turn 1A → shoot heading ===");
+  executeTurn(SHOOT_HEADING_DEG);
   waitMs(pause_ms);
 
-  Serial.println("=== RECT(S3): SHOOT @ 30° ===");
+  Serial.println("=== RECT(S3): SHOOT @ shoot heading ===");
   servoWrite(SERVO_SHOOT);
   delay(250);
   servoWrite(SERVO_NEUTRAL);
