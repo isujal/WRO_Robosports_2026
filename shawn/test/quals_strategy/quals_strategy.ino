@@ -29,7 +29,7 @@ int lap3Counter = 0;   // counts laps; every 3rd lap uses shorter breadth_pause 
 int   lapCounter     = 0;    // counts laps for heading drift correction
 const int SLOW = 140;          // ← ADD
 
-const int SLOWED = 55;
+const int SLOWED = 55; 
 // bool lapCounterResetForPhase2 = false; // global flag, declared once
 
 // ── EMA smoothing state for PURPLE ZONE cx/cy only ── ADD THESE 5 LINES
@@ -41,17 +41,16 @@ bool  ema_zone_init = false;
 const float SHOOT_HEADING_DEG = 30.0;
 
 // ── Match timer ──────────────────────────────────────────
-const unsigned long MATCH_DURATION_MS = 121000; // 120 seconds = 2 minutes
+const unsigned long MATCH_DURATION_MS = 120000; // 120 seconds = 2 minutes
 unsigned long matchStartTime = 0;                // set once the switch fires
 
 // unsigned long rectPhaseStartTime = 0;
 // const unsigned long PHASE1_DURATION_MS = 15000; // 15 seconds
 
-
 unsigned long rectPhaseStartTime = 0;
 const unsigned long PHASE1_DURATION_MS = 88000; // 15 seconds — phase 1 ends here
 const unsigned long PHASE2_DURATION_MS = 108000; // was 35000 — phase 2 ends here
-const unsigned long PHASE3_START_MS    = 117000; // ← ADD — phase 3 doesn't begin until here
+const unsigned long PHASE3_START_MS    = 116000; // ← ADD — phase 3 doesn't begin until here
 
 bool lap3CounterResetForPhase2 = false; // was lapCounterResetForPhase2
 // --- Referee start toggle switch ---
@@ -90,7 +89,7 @@ const int           T4_SPEED     = 180;
 // --- Rectangle ---
 const float STOP_DISTANCE_CM = 14.0;
 const float STOP_DISTANCE_CM_2 = 6.0;
-int         breadth_pause    = 1300;
+int         breadth_pause    = 1400;
 int         pause_ms         = 50;
 
 // --- Pixy2 zone detection ---
@@ -134,7 +133,7 @@ const int M2B = 16;
 
 const int INTAKE_IN1   = 38;
 const int INTAKE_IN2   = 39;
-const int INTAKE_SPEED = 255;
+const int INTAKE_SPEED = 200;
 
 #define SERVO_PIN 40
 constexpr uint32_t SERVO_PWM_FREQ = 50;
@@ -154,10 +153,11 @@ const float FWD_KP          = 2.6;
 const float FWD_KI          = 0.0;
 const float FWD_KD          = 0.5;
 const int   FWD_BASE_SPEED  = 220;   // used ONLY by runTrajectory1-4 (via executeDrive/executeDriveUntilClose)
-const int   FWD_BASE_SPEED_2  = 60; // RECTANGLE-ONLY slow speed — used for Side2/Side4, and the
+const int   FWD_BASE_SPEED_2  = 55; // RECTANGLE-ONLY slow speed — used for Side2/Side4, and the
 const int   FWD_BASE_SPEED_4  = 140; // RECTANGLE-ONLY slow speed — used for Side2/Side4, and the
 
-const int   FWD_BASE_SPEED_3  = 80; // RECTANGLE-ONLY slow speed — used for Side2/Side4, and the
+const int   FWD_BASE_SPEED_3  = 75; // RECTANGLE-ONLY slow speed — used for Side2/Side4, and the
+const int   FWD_BASE_SPEED_6  = 85; // RECTANGLE-ONLY slow speed — used for Side2/Side4, and the
 
                                       // second (crawl) phase of Side1/Side3 after RECT_FULLSPEED_MS
 const unsigned long RECT_FULLSPEED_MS = 800; // Side1/Side3: run at FWD_BASE_SPEED for this long,
@@ -166,7 +166,7 @@ const int   FWD_MAX_CORRECT = 60;
 const float FWD_DEADBAND    = 1.5;
 const int   FWD_INTERVAL    = 20;
 
-const float TRN_KP           = 6.0;
+const float TRN_KP           = 5.0;
 const float TRN_KI           = 0.0;
 const float TRN_KD           = 0.5;
 const int   TRN_MIN_SPEED    = 60;
@@ -374,7 +374,7 @@ while (!matchTimeUp()) {
 while (!matchTimeUp()) {
   unsigned long elapsedPhase = millis() - rectPhaseStartTime;
   if (elapsedPhase < PHASE1_DURATION_MS) {
-    runRectangleLap();                 // or runRectangleLapFromSide3() for the Side-3 branches
+    runRectangleLapFromSide3();                 // or runRectangleLapFromSide3() for the Side-3 branches
   } else if (elapsedPhase < PHASE2_DURATION_MS) {
     if (!lap3CounterResetForPhase2) {
       lap3Counter = 0;
@@ -404,7 +404,7 @@ matchEndStop();
 while (!matchTimeUp()) {
   unsigned long elapsedPhase = millis() - rectPhaseStartTime;
   if (elapsedPhase < PHASE1_DURATION_MS) {
-    runRectangleLap();                 // or runRectangleLapFromSide3() for the Side-3 branches
+    runRectangleLapFromSide3();                 // or runRectangleLapFromSide3() for the Side-3 branches
   } else if (elapsedPhase < PHASE2_DURATION_MS) {
     if (!lap3CounterResetForPhase2) {
       lap3Counter = 0;
@@ -425,6 +425,12 @@ while (!matchTimeUp()) {
 }
 matchEndStop();
   } else {
+    // Serial.println("DECISION: TOP-RIGHT → Trajectory 4 → Rect from Side 3");
+    // runTrajectory4();
+    // Serial.println("=== ENTERING RECTANGLE LOOP (from Side 3) ===");
+    // rectPhaseStartTime = millis();
+    // lap3CounterResetForPhase2 = false;
+
     Serial.println("DECISION: UNKNOWN → defaulting to Rect from Side 1");
     rectPhaseStartTime = millis();
     lap3CounterResetForPhase2 = false;
@@ -886,6 +892,9 @@ void runTrajectory3() {
   servoWrite(SERVO_SHOOT);
   delay(250);
 
+    executeDriveSpeed(1400, 30, 120);
+
+
   // Step 11: Turn to 180° to align with Side 3 direction
   Serial.println("T3 S11: Realign → 180°");
   executeTurn(180.0);
@@ -946,10 +955,13 @@ void runTrajectory4() {
   Serial.println("T4 S8: Servo → NEUTRAL");
   servoWrite(SERVO_NEUTRAL);
   delay(250);
+  executeDriveSpeed(1400, 30, 120);
 
   // Step 9: Stop
   Serial.println("T4 S9: Stop");
   motorsStop();
+
+
 
   // Step 10: Turn to 180° to align with Side 3 direction
   Serial.println("T4 S10: Realign → 180°");
@@ -966,7 +978,7 @@ void runRectangleLap2() {
 
   // SIDE 1 — time-based 750ms
   Serial.println("=== RECT: Side 1 @ 0° (750ms) ===");
-  executeDrive(850, 0.0);
+  executeDrive(800, 0.0);    //// sohum store
   waitMs(pause_ms);
   servoWrite(SERVO_SHOOT);
 
@@ -994,7 +1006,7 @@ if (lapCounter >= 2) {
 
   // SIDE 2 — time-based
   Serial.println("=== RECT: Side 2 @ 90° (time, slow) ===");
-  executeDriveSpeed(breadth_pause, 90.0 - offset2, FWD_BASE_SPEED_3);
+  executeDriveSpeed(breadth_pause, 90.0 - offset2, FWD_BASE_SPEED_6);
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 2 → 135° ===");
@@ -1014,16 +1026,18 @@ if (lapCounter >= 2) {
   lap3Counter++;
   int side4Duration = breadth_pause;
   float side4Offset2 = offset2;           // ← add this
+  bool isLap3Special = false;             // ← ADD: remembers this lap hit the special case
   if (lap3Counter >= 3) {
     side4Duration = 450;
     side4Offset2  = -5.0;                  // ← zero offset2 on 3rd lap
     lap3Counter = 0;
+    isLap3Special = true;                 // ← ADD
     Serial.println("=== LAP 3 SPECIAL: Side 4 shortened + offset zeroed ===");
   }
 
   // SIDE 4 — time-based
   Serial.println("=== RECT: Side 4 @ -90° (time, slow) ===");
-    executeDriveSpeed(breadth_pause, (-90.0 - offset2),  FWD_BASE_SPEED_3);
+    executeDriveSpeed(breadth_pause, (-90.0 - offset2),  FWD_BASE_SPEED_6);
 
   waitMs(pause_ms);
 
@@ -1053,8 +1067,8 @@ void runRectangleLap() {
 
   // SIDE 1 — TOF triggered, shoot midway
   Serial.println("=== RECT: Side 1 @ 0° (TOF + shoot midway, slow) ===");
-  executeDriveUntilCloseSpeed(0.0, STOP_DISTANCE_CM, true, false, FWD_BASE_SPEED_2);
-  waitMs(pause_ms);
+  executeDriveUntilCloseSpeed(5.0, STOP_DISTANCE_CM, true, false, FWD_BASE_SPEED_2);   // 0.0 
+  // waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 1 → 45° ===");
   // executeTurn(SHOOT_HEADING_DEG);
@@ -1102,10 +1116,12 @@ if (lapCounter >= 2) {
   lap3Counter++;
   int side4Duration = breadth_pause;
   float side4Offset2 = offset2;           // ← add this
+  bool isLap3Special = false;             // ← ADD: remembers this lap hit the special case
   if (lap3Counter >= 3) {
     side4Duration = 450;
     side4Offset2  = -5.0;                  // ← zero offset2 on 3rd lap
     lap3Counter = 0;
+    isLap3Special = true;                 // ← ADD
     Serial.println("=== LAP 3 SPECIAL: Side 4 shortened + offset zeroed ===");
   }
 
@@ -1150,10 +1166,12 @@ void runRectangleLapFromSide3() {
   lap3Counter++;
   int side4Duration = breadth_pause;
   float side4Offset2 = offset2;           // ← add this
+  bool isLap3Special = false;             // ← ADD: remembers this lap hit the special case
   if (lap3Counter >= 3) {
     side4Duration = 450;
     side4Offset2  = -5.0;                  // ← zero offset2 on 3rd lap
     lap3Counter = 0;
+    isLap3Special = true;                 // ← ADD
     Serial.println("=== LAP 3 SPECIAL: Side 4 shortened + offset zeroed ===");
   }
 
@@ -1161,17 +1179,27 @@ void runRectangleLapFromSide3() {
 
   // SIDE 4 — time-based
   Serial.println("=== RECT(S3): Side 4 @ -90° (time, slow) ===");
-  executeDriveSpeed(side4Duration, -90.0- side4Offset2,FWD_BASE_SPEED_3);
+  executeDriveSpeed(side4Duration, -90.0- side4Offset2,FWD_BASE_SPEED_6);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 4 → -45° ===");
   executeTurn(-45.0 + offset1);
   waitMs(pause_ms);
 
-  // SIDE 1 — TOF triggered, shoot midway
-  Serial.println("=== RECT(S3): Side 1 @ 0° (TOF + shoot midway, slow) ===");
-  executeDriveUntilCloseSpeed(0.0 - offset2, STOP_DISTANCE_CM, true, false, FWD_BASE_SPEED_2);
+  // SIDE 1 — TOF triggered. Midway shoot on normal laps; on the lap3
+  // special case, shootMidway is OFF here — shot happens right after
+  // Side 1 finishes instead (see block below).
+  Serial.println("=== RECT(S3): Side 1 @ 0° (TOF) ===");
+  executeDriveUntilCloseSpeed(0.0 - offset2, STOP_DISTANCE_CM, !isLap3Special, false, FWD_BASE_SPEED_2);
   waitMs(pause_ms);
+
+  if (isLap3Special) {
+    // ── LAP 3 SPECIAL: shoot now — after Side 1, before Turn 1 ──
+    Serial.println("=== RECT(S3): LAP3 SPECIAL — SHOOT after Side1, before Turn1 ===");
+    servoWrite(SERVO_SHOOT);
+    delay(250);
+    servoWrite(SERVO_NEUTRAL);
+  }
 
   Serial.println("=== RECT(S3): Turn 1 → 45° ===");
   // executeTurn(SHOOT_HEADING_DEG);
@@ -1331,7 +1359,7 @@ void runRectangleLapFromSide3_2() {
 
   // SIDE 4 — time-based
   Serial.println("=== RECT(S3-2): Side 4 @ -90° (time, slow) ===");
-  executeDriveSpeed(breadth_pause, -90.0 - offset2, FWD_BASE_SPEED_3);
+  executeDriveSpeed(breadth_pause, -90.0 - offset2, FWD_BASE_SPEED_6);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3-2): Turn 4 → -45° ===");
@@ -1340,7 +1368,7 @@ void runRectangleLapFromSide3_2() {
 
   // ── SIDE 1 — swapped to time-based (matches runRectangleLap2()) ──
   Serial.println("=== RECT(S3-2): Side 1 @ 0° (600ms) ===");
-  executeDrive(850, 0.0);
+  executeDrive(800, 0.0); //// sohum store
   waitMs(pause_ms);
   servoWrite(SERVO_SHOOT);
 

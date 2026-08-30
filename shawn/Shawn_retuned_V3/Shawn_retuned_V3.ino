@@ -1,4 +1,4 @@
-// =========================SHAWN===================================
+// =========================SHAWN (ANGULAR + ENDGAME)===================================
 //  FULL RUN — ESP32-S3 + BNO085 + VL53L0X + Pixy2 + MDD 3A
 //
 //  BOOT FLOW:
@@ -29,17 +29,30 @@ int lap3Counter = 0;   // counts laps; every 3rd lap uses shorter breadth_pause 
 int   lapCounter     = 0;    // counts laps for heading drift correction
 const int SLOW = 140;          // ← ADD
 
-
+const int SLOWED = 55;
+// bool lapCounterResetForPhase2 = false; // global flag, declared once 
 // ── EMA smoothing state for PURPLE ZONE cx/cy only ── ADD THESE 5 LINES
 float ema_cx = -1.0f;
 float ema_cy = -1.0f;
 bool  ema_zone_init = false;
 #define ZONE_EMA_ALPHA      0.5f
 #define ZONE_OUTLIER_JUMP   40
-// const float SHOOT_HEADING_DEG = 35.0;
+const float SHOOT_HEADING_DEG = 37.5;
+
+// ── Match timer ──────────────────────────────────────────
+const unsigned long MATCH_DURATION_MS = 121000; // 120 seconds = 2 minutes
+unsigned long matchStartTime = 0;                // set once the switch fires
+
+// unsigned long rectPhaseStartTime = 0;
+// const unsigned long PHASE1_DURATION_MS = 15000; // 15 seconds
 
 
+unsigned long rectPhaseStartTime = 0;
+const unsigned long PHASE1_DURATION_MS = 88000; // 15 seconds — phase 1 ends here
+const unsigned long PHASE2_DURATION_MS = 108000; // was 35000 — phase 2 ends here
+const unsigned long PHASE3_START_MS    = 117000; // ← ADD — phase 3 doesn't begin until here
 
+bool lap3CounterResetForPhase2 = false; // was lapCounterResetForPhase2
 // --- Referee start toggle switch ---
 #define SWITCH_PWR              48
 #define SWITCH_SIG              47
@@ -76,7 +89,7 @@ const int           T4_SPEED     = 180;
 // --- Rectangle ---
 const float STOP_DISTANCE_CM = 14.0;
 const float STOP_DISTANCE_CM_2 = 6.0;
-int         breadth_pause    = 1100;
+int         breadth_pause    = 1300;
 int         pause_ms         = 50;
 
 // --- Pixy2 zone detection ---
@@ -141,6 +154,7 @@ const float FWD_KI          = 0.0;
 const float FWD_KD          = 0.5;
 const int   FWD_BASE_SPEED  = 220;   // used ONLY by runTrajectory1-4 (via executeDrive/executeDriveUntilClose)
 const int   FWD_BASE_SPEED_2  = 60; // RECTANGLE-ONLY slow speed — used for Side2/Side4, and the
+const int   FWD_BASE_SPEED_4  = 140; // RECTANGLE-ONLY slow speed — used for Side2/Side4, and the
 
 const int   FWD_BASE_SPEED_3  = 80; // RECTANGLE-ONLY slow speed — used for Side2/Side4, and the
 
@@ -151,12 +165,12 @@ const int   FWD_MAX_CORRECT = 60;
 const float FWD_DEADBAND    = 1.5;
 const int   FWD_INTERVAL    = 20;
 
-const float TRN_KP           = 5.0;
+const float TRN_KP           = 6.0;
 const float TRN_KI           = 0.0;
 const float TRN_KD           = 0.5;
 const int   TRN_MIN_SPEED    = 60;
 const int   TRN_MAX_SPEED    = 255;
-const float TRN_DEADBAND     = 6.0;
+const float TRN_DEADBAND     = 8.0;
 const int   TRN_INTERVAL     = 20;
 const int   TRN_STABLE_COUNT = 8;
 
@@ -198,27 +212,28 @@ void  executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMi
 // NOTE: this prototype was previously commented out, which is why the
 // definition further down was never being wired into the rectangle calls.
 void  executeDriveSpeed(unsigned long durationMs, float targetHeading, const int speed);
-void  executeDriveUntilCloseSpeed(float targetHeading, float stopDistCm, bool shootMidway, bool reverseIntakeAtStart, const int speed);
+void  executeDriveUntilCloseSpeed(float targetHeading, float stopDistCm, bool shootMidway, bool reverseIntakeAtStart, const int speed, unsigned long shootDelayMs = 650);
 void  runForwardPIDSpeed(float targetHeading, float &prevErr, float &integ, const int speed);
 
 void  executeTurn(float targetAngle);
 
 void  runForwardPID(float targetHeading, float &prevErr, float &integ);
 void  runTurnPID(float targetAngle, float &prevErr, float &integ);
-
+void  runRectangleLap3();
 void  driveMotors(int leftSpeed, int rightSpeed);
 void  turnClockwise(int speed);
 void  turnAntiClockwise(int speed);
 void  motorsStop();
 void  setMotorPins();
 void  waitMs(int ms);
-
+void  runRectangleLap2();
 void  initServo();
 void  servoWrite(int angle);
 void  initIntake();
 void  intakeOn();
 void  intakeOff();
 void  intakeReverseSlowed();
+void intakestore();
 void  initIMU();
 void  zeroIMU();
 float getRawYaw();
@@ -231,7 +246,8 @@ void  initStartSwitch();
 bool  isStartSwitchOn();
 void  waitForStartSwitch();
 float getDistanceCm();
-
+void  executeDriveBackward(unsigned long durationMs, float targetHeading);
+void  runForwardPIDBackward(float targetHeading, float &prevErr, float &integ);
 
 void setLedForZone(Zone z) {
   switch (z) {
@@ -243,7 +259,9 @@ void setLedForZone(Zone z) {
   }
   FastLED.show();
 }
-
+bool matchTimeUp() {
+  return millis() - matchStartTime >= MATCH_DURATION_MS;
+}
 // ============================================================
 //  SETUP
 // ============================================================
@@ -276,6 +294,7 @@ void setup() {
   setLedForZone(UNKNOWN);        // ← LED ON after detection, during wait
 
   waitForStartSwitch();
+  matchStartTime = millis();     // ← ADD: match clock starts the instant the switch fires
 
   leds[0] = CRGB::Black;             // ← LED OFF when switch fires
   FastLED.show();
@@ -286,37 +305,151 @@ void setup() {
 // ============================================================
 void loop() {
 
-  // ── STEP 1: Detect purple ball zone ──────────────────────
-  // Zone detectedZone = detectPurpleBall();
-
-  // ── STEP 2: Run correct trajectory + correct rect entry ──
   if (decidedZone  == BOT_LEFT) {
     Serial.println("DECISION: BOT-LEFT → Trajectory 1 → Rect from Side 1");
     runTrajectory1();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 1) ===");
-    while (true) { runRectangleLap(); }
+rectPhaseStartTime = millis();
+lap3CounterResetForPhase2 = false;
+while (!matchTimeUp()) {
+  unsigned long elapsedPhase = millis() - rectPhaseStartTime;
+  if (elapsedPhase < PHASE1_DURATION_MS) {
+    runRectangleLap();                 // or runRectangleLapFromSide3() for the Side-3 branches
+  } else if (elapsedPhase < PHASE2_DURATION_MS) {
+    if (!lap3CounterResetForPhase2) {
+      lap3Counter = 0;
+      lap3CounterResetForPhase2 = true;
+      Serial.println("=== PHASE 2 START: lap3Counter reset to 0 ===");
+    }
+    runRectangleLap2();                // or runRectangleLapFromSide3_2()
+  } else if (elapsedPhase < PHASE3_START_MS) {
+    // ── WAIT ── phase 2's current lap already finished (the while-loop only
+    // re-checks time between full function calls), bot holds still until 35s
+    motorsStop();
+    intakeOff();
+    delay(50);
+  } else {
+    runRectangleLap3();
+    // matchEndStop();   // never returns — phase 3 runs exactly once, then bot stops
+  }
+}
+    matchEndStop();
 
   } else if (decidedZone  == TOP_LEFT) {
     Serial.println("DECISION: TOP-LEFT → Trajectory 2 → Rect from Side 1");
     runTrajectory2();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 1) ===");
-    while (true) { runRectangleLap(); }
+    rectPhaseStartTime = millis();
+    lap3CounterResetForPhase2 = false;
+while (!matchTimeUp()) {
+  unsigned long elapsedPhase = millis() - rectPhaseStartTime;
+  if (elapsedPhase < PHASE1_DURATION_MS) {
+    runRectangleLap();                 // or runRectangleLapFromSide3() for the Side-3 branches
+  } else if (elapsedPhase < PHASE2_DURATION_MS) {
+    if (!lap3CounterResetForPhase2) {
+      lap3Counter = 0;
+      lap3CounterResetForPhase2 = true;
+      Serial.println("=== PHASE 2 START: lap3Counter reset to 0 ===");
+    }
+    runRectangleLap2();                // or runRectangleLapFromSide3_2()
+  } else if (elapsedPhase < PHASE3_START_MS) {
+    // ── WAIT ── phase 2's current lap already finished (the while-loop only
+    // re-checks time between full function calls), bot holds still until 35s
+    motorsStop();
+    intakeOff();
+    delay(50);
+  } else {
+    runRectangleLap3();
+    // matchEndStop();   // never returns — phase 3 runs exactly once, then bot stops
+  }
+}matchEndStop();
 
   } else if (decidedZone  == BOT_RIGHT) {
     Serial.println("DECISION: BOT-RIGHT → Trajectory 3 → Rect from Side 3");
     runTrajectory3();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 3) ===");
-    while (true) { runRectangleLapFromSide3(); }
+    rectPhaseStartTime = millis();
+    lap3CounterResetForPhase2 = false;
+while (!matchTimeUp()) {
+  unsigned long elapsedPhase = millis() - rectPhaseStartTime;
+  if (elapsedPhase < PHASE1_DURATION_MS) {
+    runRectangleLap();                 // or runRectangleLapFromSide3() for the Side-3 branches
+  } else if (elapsedPhase < PHASE2_DURATION_MS) {
+    if (!lap3CounterResetForPhase2) {
+      lap3Counter = 0;
+      lap3CounterResetForPhase2 = true;
+      Serial.println("=== PHASE 2 START: lap3Counter reset to 0 ===");
+    }
+    runRectangleLap2();                // or runRectangleLapFromSide3_2()
+  } else if (elapsedPhase < PHASE3_START_MS) {
+    // ── WAIT ── phase 2's current lap already finished (the while-loop only
+    // re-checks time between full function calls), bot holds still until 35s
+    motorsStop();
+    intakeOff();
+    delay(50);
+  } else {
+    runRectangleLap3();
+    // matchEndStop();   // never returns — phase 3 runs exactly once, then bot stops
+  }
 
+}
+matchEndStop();
   } else if (decidedZone  == TOP_RIGHT) {
     Serial.println("DECISION: TOP-RIGHT → Trajectory 4 → Rect from Side 3");
     runTrajectory4();
     Serial.println("=== ENTERING RECTANGLE LOOP (from Side 3) ===");
-    while (true) { runRectangleLapFromSide3(); }
-
-  } 
-  else {
-    while (true) { runRectangleLap(); }
+    rectPhaseStartTime = millis();
+    lap3CounterResetForPhase2 = false;
+while (!matchTimeUp()) {
+  unsigned long elapsedPhase = millis() - rectPhaseStartTime;
+  if (elapsedPhase < PHASE1_DURATION_MS) {
+    runRectangleLap();                 // or runRectangleLapFromSide3() for the Side-3 branches
+  } else if (elapsedPhase < PHASE2_DURATION_MS) {
+    if (!lap3CounterResetForPhase2) {
+      lap3Counter = 0;
+      lap3CounterResetForPhase2 = true;
+      Serial.println("=== PHASE 2 START: lap3Counter reset to 0 ===");
+    }
+    runRectangleLap2();                // or runRectangleLapFromSide3_2()
+  } else if (elapsedPhase < PHASE3_START_MS) {
+    // ── WAIT ── phase 2's current lap already finished (the while-loop only
+    // re-checks time between full function calls), bot holds still until 35s
+    motorsStop();
+    intakeOff();
+    delay(50);
+  } else {
+    runRectangleLap3();
+    // matchEndStop();   // never returns — phase 3 runs exactly once, then bot stops
+  }
+}
+matchEndStop();
+  } else {
+    Serial.println("DECISION: UNKNOWN → defaulting to Rect from Side 1");
+    rectPhaseStartTime = millis();
+    lap3CounterResetForPhase2 = false;
+while (!matchTimeUp()) {
+  unsigned long elapsedPhase = millis() - rectPhaseStartTime;
+  if (elapsedPhase < PHASE1_DURATION_MS) {
+    runRectangleLap();                 // or runRectangleLapFromSide3() for the Side-3 branches
+  } else if (elapsedPhase < PHASE2_DURATION_MS) {
+    if (!lap3CounterResetForPhase2) {
+      lap3Counter = 0;
+      lap3CounterResetForPhase2 = true;
+      Serial.println("=== PHASE 2 START: lap3Counter reset to 0 ===");
+    }
+    runRectangleLap2();                // or runRectangleLapFromSide3_2()
+  } else if (elapsedPhase < PHASE3_START_MS) {
+    // ── WAIT ── phase 2's current lap already finished (the while-loop only
+    // re-checks time between full function calls), bot holds still until 35s
+    motorsStop();
+    intakeOff();
+    delay(50);
+  } else {
+    runRectangleLap3();
+    // matchEndStop();   // never returns — phase 3 runs exactly once, then bot stops
+  }
+}
+matchEndStop();
   }
 }
 struct ZoneCentroid { Zone z; float cx; float cy; };
@@ -466,6 +599,17 @@ Zone detectPurpleBall() {
   else                     { Serial.println("  RESULT: BOT-RIGHT"); return BOT_RIGHT; }
 }
 
+
+void matchEndStop() {
+  motorsStop();
+  intakeOff();
+  // servoWrite(SERVO_NEUTRAL);
+  Serial.println("=== MATCH TIME UP — STOPPING ===");
+  while (true) {
+    // halt forever; nothing more should run after the match ends
+    delay(1000);
+  }
+}
 // ============================================================
 //  TRAJECTORY 1 — Bot-Left (Purple → Orange)
 //
@@ -527,7 +671,106 @@ void runTrajectory1() {
   Serial.println("=== TRAJECTORY 1 DONE ===");
   waitMs(pause_ms);
 }
+// ============================================================
+//  runRectangleLap3()
+//  Phase-3 (35s+) trajectory. Follows the same movement as Side 1
+//  of runRectangleLap() — drive to the Side1 wall (TOF), then turn
+//  to the shoot heading — but the servo is held at SERVO_SHOOT the
+//  entire time instead of toggling to NEUTRAL. Called repeatedly by
+//  the phase-3 branch in loop(), for every zone (BOT_LEFT, TOP_LEFT,
+//  BOT_RIGHT, TOP_RIGHT, UNKNOWN alike) — it's independent of which
+//  side the bot started from.
+// ============================================================
+void runRectangleLap3() {
 
+  Serial.println("========================================");
+  Serial.println("=== RECT3: TIME-BASED CONTINUOUS DRIVE ===");
+  Serial.println("=== 0-550ms  : SPEED 220              ===");
+  Serial.println("=== 550ms-END: SPEED 60 + SERVO SHOOT ===");
+  Serial.println("=== NO TOF / NO DISTANCE SENSOR       ===");
+  Serial.println("========================================");
+
+  // Intake ON continuously
+  intakeOn();
+
+  // Start servo in neutral
+  servoWrite(SERVO_NEUTRAL);
+
+  unsigned long startTime = millis();
+
+  float prevErr = 0.0;
+  float integ   = 0.0;
+
+  unsigned long lastPIDTime = millis();
+
+  const float TARGET_HEADING = 0.0;
+
+  bool shootTriggered = false;
+
+  while (!matchTimeUp()) {
+
+    unsigned long now = millis();
+    unsigned long elapsed = now - startTime;
+
+    // ----------------------------------------------------------
+    // FIRST 550 ms
+    // Drive forward at SPEED 220
+    // Servo remains neutral
+    // ----------------------------------------------------------
+    if (elapsed < 650) {
+
+      if (now - lastPIDTime >= FWD_INTERVAL) {
+
+        lastPIDTime = now;
+
+        runForwardPIDSpeed(
+          TARGET_HEADING,
+          prevErr,
+          integ,
+          220
+        );
+      }
+    }
+
+    // ----------------------------------------------------------
+    // AFTER 550 ms
+    // Servo -> SHOOT
+    // Drive continuously at SPEED 60
+    // Servo stays SHOOT until match ends
+    // ----------------------------------------------------------
+    else {
+
+      // Move servo to shooting position ONCE
+      if (!shootTriggered) {
+
+        servoWrite(SERVO_SHOOT);
+        shootTriggered = true;
+
+        Serial.println("=== 550 ms REACHED ===");
+        Serial.println("=== SERVO -> SHOOT ===");
+        Serial.println("=== SPEED -> 60 ===");
+      }
+
+      // Continue driving forward at 60
+      if (now - lastPIDTime >= FWD_INTERVAL) {
+
+        lastPIDTime = now;
+
+        runForwardPIDSpeed(
+          TARGET_HEADING,
+          prevErr,
+          integ,
+          60
+        );
+      }
+    }
+
+    // Intake NEVER stops
+    intakeOn();
+  }
+
+  Serial.println("=== RECT3 COMPLETE — 50 SECOND MATCH ===");
+}
 // ============================================================
 //  TRAJECTORY 2 — Top-Left (Orange → Purple)
 //
@@ -715,6 +958,81 @@ void runTrajectory4() {
   Serial.println("=== TRAJECTORY 4 DONE ===");
   waitMs(pause_ms);
 }
+void runRectangleLap2() {
+
+  intakeOn();
+  servoWrite(SERVO_NEUTRAL);
+
+  // SIDE 1 — time-based 750ms
+  Serial.println("=== RECT: Side 1 @ 0° (750ms) ===");
+  executeDrive(750, 0.0);    //// sohum store
+  waitMs(pause_ms);
+  servoWrite(SERVO_SHOOT);
+
+  // Intake reverse after Side 1
+  intakestore();
+  delay(1000);                  // hold reverse briefly before turning
+
+  executeDriveBackward(250, 0.0);   // drive backward for 700ms, holding heading 0.0
+
+  Serial.println("=== RECT: Turn 1 → 90° ===");
+  executeTurn(85.0);           // exact 90, no offset
+  servoWrite(SERVO_NEUTRAL);
+  intakeOn();
+
+  lapCounter++;
+if (lapCounter >= 2) {
+  driftCorrection += 1.0;
+  lapCounter = 0;
+  Serial.print("=== DRIFT CORRECTION: "); Serial.println(driftCorrection, 1);
+}
+
+  waitMs(pause_ms);
+
+
+
+  // SIDE 2 — time-based
+  Serial.println("=== RECT: Side 2 @ 90° (time, slow) ===");
+  executeDriveSpeed(breadth_pause, 90.0 - offset2, FWD_BASE_SPEED_3);
+  waitMs(pause_ms);
+
+  Serial.println("=== RECT: Turn 2 → 135° ===");
+  executeTurn(135.0  + offset1);
+  waitMs(pause_ms);
+
+  // SIDE 3 — TOF triggered, no shoot
+  Serial.println("=== RECT: Side 3 @ 180° (TOF, slow) ===");
+  executeDriveUntilCloseSpeed2(180.0, STOP_DISTANCE_CM_2, false, true, FWD_BASE_SPEED_3);
+  waitMs(pause_ms);
+
+  Serial.println("=== RECT: Turn 3 → -135° ===");
+  executeTurn(-135.0  + offset1);
+  waitMs(pause_ms);
+
+
+  lap3Counter++;
+  int side4Duration = breadth_pause;
+  float side4Offset2 = offset2;           // ← add this
+  if (lap3Counter >= 3) {
+    side4Duration = 450;
+    side4Offset2  = -5.0;                  // ← zero offset2 on 3rd lap
+    lap3Counter = 0;
+    Serial.println("=== LAP 3 SPECIAL: Side 4 shortened + offset zeroed ===");
+  }
+
+  // SIDE 4 — time-based
+  Serial.println("=== RECT: Side 4 @ -90° (time, slow) ===");
+    executeDriveSpeed(breadth_pause, (-90.0 - offset2),  FWD_BASE_SPEED_3);
+
+  waitMs(pause_ms);
+
+  Serial.println("=== RECT: Turn 4 → -45° ===");
+  executeTurn(-45.0  + offset1);
+  waitMs(pause_ms);
+
+  Serial.println("=== RECT: Lap complete ===");
+}
+
 
 // ============================================================
 //  runRectangleLap()
@@ -737,9 +1055,9 @@ void runRectangleLap() {
   executeDriveUntilCloseSpeed(0.0, STOP_DISTANCE_CM, true, false, FWD_BASE_SPEED_2);
   waitMs(pause_ms);
 
-  // Serial.println("=== RECT: Turn 1 → 45° ===");
-  // executeTurn(SHOOT_HEADING_DEG);
-  // waitMs(pause_ms);
+  Serial.println("=== RECT: Turn 1 → 45° ===");
+  executeTurn(SHOOT_HEADING_DEG);
+  waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): SHOOT @ shoot heading ===");
   servoWrite(SERVO_SHOOT);
@@ -747,9 +1065,9 @@ void runRectangleLap() {
   servoWrite(SERVO_NEUTRAL);
 
   Serial.println("=== RECT(S3): Turn 1B → 90° ===");
-  executeTurn(90.0);
-  // servoWrite(SERVO_NEUTRAL);   // ← release shoot after Turn 1
-
+  executeTurn(45.0 + offset1);
+  servoWrite(SERVO_NEUTRAL);   // ← release shoot after Turn 1
+  waitMs(pause_ms);
   lapCounter++;
 if (lapCounter >= 2) {
   driftCorrection += 1.0;
@@ -854,9 +1172,9 @@ void runRectangleLapFromSide3() {
   executeDriveUntilCloseSpeed(0.0 - offset2, STOP_DISTANCE_CM, true, false, FWD_BASE_SPEED_2);
   waitMs(pause_ms);
 
-  // Serial.println("=== RECT(S3): Turn 1 → 45° ===");
-  // executeTurn(SHOOT_HEADING_DEG);
-  // waitMs(pause_ms);
+  Serial.println("=== RECT(S3): Turn 1 → 45° ===");
+  executeTurn(SHOOT_HEADING_DEG);
+  waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): SHOOT @ shoot heading ===");
   servoWrite(SERVO_SHOOT);
@@ -864,7 +1182,8 @@ void runRectangleLapFromSide3() {
   servoWrite(SERVO_NEUTRAL);
 
   Serial.println("=== RECT(S3): Turn 1B → 90° ===");
-  executeTurn(90.0);
+  executeTurn(45.0+ offset1);
+  waitMs(pause_ms);
 lapCounter++;
 if (lapCounter >= 2) {
   driftCorrection += 1.0;
@@ -944,7 +1263,7 @@ void executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMid
       servoShot = true;
       Serial.println("Side1: servo SHOOT at 50ms");
     }
-    if (reverseIntakeAtStart && !intakeSwitched && elapsed >= 250) {
+    if (reverseIntakeAtStart && !intakeSwitched && elapsed >= 500) {
       intakeOn();
       servoWrite(SERVO_NEUTRAL);
       intakeSwitched = true;
@@ -979,7 +1298,102 @@ if (shootMidway && !shootTriggered && (now - startTime >= 900)) {
 
   motorsStop();
 }
+// ============================================================
+//  runRectangleLapFromSide3_2()
+//  Phase-2 counterpart to runRectangleLapFromSide3(). Identical
+//  except Side 1 uses the same time-based approach as
+//  runRectangleLap2()'s Side 1, instead of the TOF-triggered one.
+// ============================================================
+void runRectangleLapFromSide3_2() {
 
+  intakeOn();
+  servoWrite(SERVO_NEUTRAL);
+
+  // SIDE 3 — TOF triggered, no shoot (entering mid-rect)
+  Serial.println("=== RECT(S3-2): Side 3 @ 180° (TOF, slow) ===");
+  executeDriveUntilCloseSpeed2(180.0, STOP_DISTANCE_CM_2, false, true, FWD_BASE_SPEED_2);
+  waitMs(pause_ms);
+
+  Serial.println("=== RECT(S3-2): Turn 3 → -135° ===");
+  executeTurn(-135.0 + offset1);
+  waitMs(pause_ms);
+
+  lap3Counter++;
+  int side4Duration = breadth_pause;
+  float side4Offset2 = offset2;
+  if (lap3Counter >= 3) {
+    side4Duration = 450;
+    side4Offset2  = -5.0;
+    lap3Counter = 0;
+    Serial.println("=== LAP 3 SPECIAL: Side 4 shortened + offset zeroed ===");
+  }
+
+  // SIDE 4 — time-based
+  Serial.println("=== RECT(S3-2): Side 4 @ -90° (time, slow) ===");
+  executeDriveSpeed(breadth_pause, -90.0 - offset2, FWD_BASE_SPEED_3);
+  waitMs(pause_ms);
+
+  Serial.println("=== RECT(S3-2): Turn 4 → -45° ===");
+  executeTurn(-45.0 + offset1);
+  waitMs(pause_ms);
+
+  // ── SIDE 1 — swapped to time-based (matches runRectangleLap2()) ──
+  Serial.println("=== RECT(S3-2): Side 1 @ 0° (600ms) ===");
+  executeDrive(750, 0.0); //// sohum store
+  waitMs(pause_ms);
+  servoWrite(SERVO_SHOOT);
+
+  intakestore();
+  delay(1000);
+executeDriveBackward(250, 0.0);   // drive backward for 700ms, holding heading 0.0
+
+  Serial.println("=== RECT(S3-2): Turn 1 → 90° ===");
+  executeTurn(85.0);
+  servoWrite(SERVO_NEUTRAL);
+  intakeOn();
+
+  lapCounter++;
+  if (lapCounter >= 2) {
+    driftCorrection += 1.0;
+    lapCounter = 0;
+    Serial.print("=== DRIFT CORRECTION: "); Serial.println(driftCorrection, 1);
+  }
+  waitMs(pause_ms);
+
+  // SIDE 2 — time-based
+  Serial.println("=== RECT(S3-2): Side 2 @ 90° (time, slow) ===");
+  executeDriveSpeed(breadth_pause, 90.0 - offset2, FWD_BASE_SPEED_3);
+  waitMs(pause_ms);
+
+  Serial.println("=== RECT(S3-2): Turn 2 → 135° ===");
+  executeTurn(135.0 + offset1);
+  waitMs(pause_ms);
+
+  Serial.println("=== RECT(S3-2): Lap complete ===");
+}
+
+
+
+// ============================================================
+//  executeDriveBackward()  [ORIGINAL-STYLE — same signature as
+//  executeDrive(), but drives in reverse while still tracking
+//  targetHeading. Uses FWD_BASE_SPEED, same as executeDrive().]
+// ============================================================
+void executeDriveBackward(unsigned long durationMs, float targetHeading) {
+  float prevErr = 0.0;
+  float integ   = 0.0;
+  unsigned long startTime   = millis();
+  unsigned long lastPIDTime = millis();
+
+  while (millis() - startTime < durationMs) {
+    unsigned long now = millis();
+    if (now - lastPIDTime >= FWD_INTERVAL) {
+      lastPIDTime = now;
+      runForwardPIDBackward(targetHeading, prevErr, integ);
+    }
+  }
+  motorsStop();
+}
 // ============================================================
 //  executeDriveUntilCloseSpeed()  [RECTANGLE-ONLY — wired into
 //  Side 1 and Side 3 of both runRectangleLap() and
@@ -991,7 +1405,7 @@ if (shootMidway && !shootTriggered && (now - startTime >= 900)) {
 //  The TOF stop check runs the whole time; in practice it crosses
 //  the trigger distance during the slow crawl phase.
 // ============================================================
-void executeDriveUntilCloseSpeed(float targetHeading, float stopDistCm, bool shootMidway, bool reverseIntakeAtStart, const int speed) {
+void executeDriveUntilCloseSpeed(float targetHeading, float stopDistCm, bool shootMidway, bool reverseIntakeAtStart, const int speed, unsigned long shootDelayMs) {
     float prevErr = 0.0;
   float integ   = 0.0;
   unsigned long lastPIDTime  = millis();
@@ -1025,7 +1439,84 @@ void executeDriveUntilCloseSpeed(float targetHeading, float stopDistCm, bool sho
       servoShot = true;
       Serial.println("Side1: servo SHOOT at 50ms");
     }
-    if (reverseIntakeAtStart && !intakeSwitched && elapsed >= 250) {
+    if (reverseIntakeAtStart && !intakeSwitched && elapsed >= 500) {
+      intakeOn();
+      servoWrite(SERVO_NEUTRAL);
+      intakeSwitched = true;
+      Serial.println("Side1: intake ON + servo NEUTRAL at 250ms");
+    }
+    // Non-blocking shoot state machine
+// Non-blocking shoot — fire and hold until Turn 1
+// Non-blocking shoot state machine
+// Non-blocking shoot — fire and hold until Turn 1
+if (shootMidway && !shootTriggered && (now - startTime >= shootDelayMs)) {
+  Serial.print("Mid-drive SHOOT triggered at ");
+  Serial.print(shootDelayMs);
+  Serial.println("ms — holding");
+  servoWrite(SERVO_SHOOT);
+  shootTriggered = true;
+}
+
+    if (now - lastPIDTime >= FWD_INTERVAL) {
+      lastPIDTime = now;
+
+      float dist = getDistanceCm();
+      Serial.print("TOF | Dist:");
+      if (dist >= 0) { Serial.print(dist, 1); Serial.print("cm"); }
+      else             Serial.print("OOR");
+
+      if (dist > 0 && dist < stopDistCm) {
+        Serial.println(" → STOP");
+        motorsStop();
+        break;
+      }
+
+      Serial.println();
+      // ── Two-phase speed: full speed first, then slow crawl ──
+      int currentSpeed = (elapsed < RECT_FULLSPEED_MS) ? FWD_BASE_SPEED : speed;
+      runForwardPIDSpeed(targetHeading, prevErr, integ, currentSpeed);
+    }
+  }
+
+  motorsStop();
+}
+
+
+void executeDriveUntilCloseSpeed2(float targetHeading, float stopDistCm, bool shootMidway, bool reverseIntakeAtStart, const int speed) {
+    float prevErr = 0.0;
+  float integ   = 0.0;
+  unsigned long lastPIDTime  = millis();
+  unsigned long startTime    = millis();
+  const unsigned long MAX_TIMEOUT = 2000;
+
+  bool shootDone      = false;
+  bool shootTriggered = false;
+  unsigned long shootStartTime = 0;
+  int shootPhase = 0;
+
+  bool intakeSwitched = false;
+  bool servoShot      = false;
+
+  if (reverseIntakeAtStart) intakeReverseSlowed();
+  else                      intakeOn();
+
+  while (true) {
+    unsigned long now = millis();
+    unsigned long elapsed = now - startTime;    // ← ADD
+
+    if (now - startTime > MAX_TIMEOUT) {
+      Serial.println("TOF: MAX TIMEOUT — stopping.");
+      break;
+    }
+
+
+   // ── Slowed reverse timing ──────────────────────────────
+    if (reverseIntakeAtStart && !servoShot && elapsed >= 50) {
+      servoWrite(SERVO_SHOOT);
+      servoShot = true;
+      Serial.println("Side1: servo SHOOT at 50ms");
+    }
+    if (reverseIntakeAtStart && !intakeSwitched && elapsed >= 500) {
       intakeOn();
       servoWrite(SERVO_NEUTRAL);
       intakeSwitched = true;
@@ -1055,14 +1546,13 @@ if (shootMidway && !shootTriggered && (now - startTime >= 650)) {
 
       Serial.println();
       // ── Two-phase speed: full speed first, then slow crawl ──
-      int currentSpeed = (elapsed < RECT_FULLSPEED_MS) ? FWD_BASE_SPEED : speed;
+      int currentSpeed = (elapsed < RECT_FULLSPEED_MS) ? FWD_BASE_SPEED_4 : speed;
       runForwardPIDSpeed(targetHeading, prevErr, integ, currentSpeed);
     }
   }
 
   motorsStop();
 }
-
 // ============================================================
 //  executeTurn()
 // ============================================================
@@ -1158,7 +1648,44 @@ void runForwardPIDSpeed(float targetHeading, float &prevErr, float &integ, const
   Serial.print(" L:"); Serial.print(leftSpeed);
   Serial.print(" R:"); Serial.println(rightSpeed);
 }
+// ============================================================
+//  runForwardPIDBackward()  [mirrors runForwardPID(), but drives
+//  the wheels in reverse — heading correction logic unchanged.]
+// ============================================================
+void runForwardPIDBackward(float targetHeading, float &prevErr, float &integ) {
+  float heading = getHeading();
+  float error   = shortestError(targetHeading, heading);
+  float dt      = FWD_INTERVAL / 1000.0;
 
+  if (abs(error) <= FWD_DEADBAND) {
+    integ   = 0.0;
+    prevErr = error;
+    driveMotors(-FWD_BASE_SPEED, -FWD_BASE_SPEED);
+    Serial.print("BWD STRAIGHT | H:"); Serial.println(heading, 1);
+    return;
+  }
+
+  integ += error * dt;
+  integ  = constrain(integ, -50, 50);
+
+  float derivative = (error - prevErr) / dt;
+  prevErr = error;
+
+  float correction = (FWD_KP * error) + (FWD_KI * integ) + (FWD_KD * derivative);
+  correction = constrain(correction, -FWD_MAX_CORRECT, FWD_MAX_CORRECT);
+
+  // Same correction sign as forward — steering direction relative to
+  // heading error is unchanged; only base speed sign flips for reverse.
+  int leftSpeed  = constrain(FWD_BASE_SPEED + (int)correction, 0, 255);
+  int rightSpeed = constrain(FWD_BASE_SPEED - (int)correction, 0, 255);
+
+  driveMotors(-leftSpeed, -rightSpeed);
+
+  Serial.print("BWD | H:"); Serial.print(heading, 1);
+  Serial.print(" E:"); Serial.print(error, 1);
+  Serial.print(" L:"); Serial.print(-leftSpeed);
+  Serial.print(" R:"); Serial.println(-rightSpeed);
+}
 // ============================================================
 //  runForwardPID()  [ORIGINAL — used by executeDrive/executeDriveUntilClose,
 //  i.e. runTrajectory1-4. Hardcodes FWD_BASE_SPEED = 220.]
@@ -1361,6 +1888,7 @@ void intakeOn() {
 }
 
 void intakeReverseSlowed() { analogWrite(INTAKE_IN1, SLOW); analogWrite(INTAKE_IN2, 0); }
+void intakestore() { analogWrite(INTAKE_IN1, SLOWED); analogWrite(INTAKE_IN2, 0); }
 
 void intakeOff() {
   analogWrite(INTAKE_IN1, 0);

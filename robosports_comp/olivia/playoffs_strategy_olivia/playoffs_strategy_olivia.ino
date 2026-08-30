@@ -1,4 +1,4 @@
-// --------------------OLIVIA -------------
+// -------------------- OLIVIA -------------
 
 #include <Wire.h>
 #include <Adafruit_BNO08x.h>
@@ -14,7 +14,9 @@ int   lapCounter     = 0;    // counts laps for heading drift correction
 float headingOffset  = 0.0;  // added to all forward-drive headings every 5 laps
 float driftCorrection = 0.0;  // subtracted from heading every 2 laps
 
-const unsigned long MATCH_DURATION_MS  = 120000;  // the ONLY stop condition — 2 minute hard stop
+const unsigned long MATCH_DURATION_MS  = 120000;  // hard stop — safety net, unchanged
+const unsigned long PHASE1_LAP_END_MS  = 100000;  // ★ stop looping laps at this point
+const unsigned long PHASE2_START_MS    = 111000;  // ★ run runRectangleLap3() at this pointunsigned long matchStartTime = 0;
 bool matchEnded = false;
 unsigned long matchStartTime = 0;
 
@@ -171,7 +173,7 @@ void  runTrajectory2();
 void  runTrajectory3();
 void  runTrajectory4();
 
-void  runRectangleLap();   // ★ CHANGED — was void, now returns true if it stopped early at Side3
+bool  runRectangleLap();   // ★ CHANGED — was void, now returns true if it stopped early at Side3
 void  runRectangleLapFromTurn1();
 void  runRectangleLapFromTurn3();
 void  runRectangleLapFromSide3();
@@ -243,13 +245,13 @@ bool matchTimeUp() {
   return false;
 }
 
-// bool phase1TimeUp() {              // ★ ADD — 25s mark: stop lap loop
-//   return millis() - matchStartTime >= PHASE1_LAP_END_MS;
-// }
+bool phase1TimeUp() {              // ★ ADD — 25s mark: stop lap loop
+  return millis() - matchStartTime >= PHASE1_LAP_END_MS;
+}
 
-// bool phase2TimeUp() {              // ★ ADD — 28s mark: fire the finale
-//   return millis() - matchStartTime >= PHASE2_START_MS;
-// }
+bool phase2TimeUp() {              // ★ ADD — 28s mark: fire the finale
+  return millis() - matchStartTime >= PHASE2_START_MS;
+}
 // ============================================================
 //  SETUP
 // ============================================================
@@ -311,19 +313,37 @@ void loop() {
 //  28s–30s: run runRectangleLap3() once
 //  30s    : matchTimeUp() hard-stops everything (safety net,
 //           still enforced inside every drive/turn function)
+// ============================================================
 void runLapsThenFinale() {
-  // Only stop condition: matchTimeUp() — the 2-minute match timer.
-  // No phases, no idle-wait, no finale. Keep running full laps until
-  // the timer runs out (and every execute* function has its own
-  // matchTimeUp() safety check too, so it halts cleanly mid-leg if
-  // the timer hits during a drive/turn, not just between laps).
+  // ── Phase 1: keep running laps; each lap decides for itself
+  //             whether to stop right after Side 3 once 25s hits ──
   while (!matchTimeUp()) {
-    runRectangleLap();
+    bool stoppedAtSide3 = runRectangleLap();
+    if (stoppedAtSide3) break;   // 25s hit mid-lap, already parked cleanly after Side3
   }
   motorsStop();
   intakeOff();
   servoWrite(SERVO_NEUTRAL);
-  Serial.println("=== MISSION COMPLETE — 2 MINUTE TIMER HIT ===");
+  Serial.println("=== PHASE 1 DONE: parked at end of Side3, idling ===");
+
+  // ── Phase 2: idle-wait until 28s ──
+  while (!phase2TimeUp() && !matchTimeUp()) {
+    motorsStop();
+    delay(10);
+  }
+
+  // ── Phase 3: run the finale once, if we haven't hit 30s already ──
+  if (!matchTimeUp()) {
+    Serial.println("=== PHASE 2 DONE @28s: running runRectangleLap3() ===");
+    runRectangleLap3();
+  } else {
+    Serial.println("=== 30s hit before finale could run — skipping ===");
+  }
+
+  motorsStop();
+  intakeOff();
+  servoWrite(SERVO_NEUTRAL);
+  Serial.println("=== MISSION COMPLETE ===");
 }
 // ============================================================
 //  runMission()
@@ -670,142 +690,142 @@ void runForwardPIDSpeed(float targetHeading, float &prevErr, float &integ, const
   Serial.print(" L:"); Serial.print(leftSpeed);
   Serial.print(" R:"); Serial.println(rightSpeed);
 }
-// void runRectangleLap3() {
-//   intakeOn();
-//     servoWrite(SERVO_NEUTRAL);
+void runRectangleLap3() {
+  intakeOn();
+  servoWrite(SERVO_NEUTRAL);
 
-//   executeDriveBackward(250, 0.0);   // drive backward for 700ms, holding heading 0.0
-// waitMs(pause_ms);
+  executeDriveBackward(250, 0.0);   // drive backward for 700ms, holding heading 0.0
+  waitMs(pause_ms);
 
-//   executeTurn(-90.0);
+  executeTurn(-90.0);
 
-//    Serial.println("=== RECT: Side 2 @ -90° (time) ===");
-//   executeDriveRect(breadth_pause, -90.0);
-//   waitMs(pause_ms);
+  Serial.println("=== RECT: Side 2 @ -90° (time) ===");
+  executeDriveRect(breadth_pause, -90.0);
+  waitMs(pause_ms);
 
-//   intakeSlowed();
-//   waitMs(pause_ms);
-//   servoWrite(SERVO_SHOOT);
-//   waitMs(350);
-//   servoWrite(SERVO_NEUTRAL);
-//   intakeOn();
+  intakeSlowed();
+  waitMs(pause_ms);
+  servoWrite(SERVO_SHOOT);
+  waitMs(350);
+  servoWrite(SERVO_NEUTRAL);
+  intakeOn();
 
-//   Serial.println("=== RECT: Turn 2 → -135° ===");
-//   executeTurn(-145.0);
-//   waitMs(pause_ms);
+  Serial.println("=== RECT: Turn 2 → -135° ===");
+  executeTurn(-145.0);
+  waitMs(pause_ms);
 
-//   // SIDE 3 — TOF, no shoot
-//   Serial.println("=== RECT: Side 3 @ 180° (TOF) ===");
-//   executeDriveUntilCloseRect(180.0, STOP_DISTANCE_CM, false, true);
-//   waitMs(pause_ms);
-
-
-// executeTurn(-90);
-// waitMs(pause_ms);
-//   executeDriveRect(800, -90.0);
-//   waitMs(pause_ms);
-// executeTurn(0);
-
-//         servoWrite(SERVO_NEUTRAL);
-//   waitMs(pause_ms);
+  // SIDE 3 — TOF, no shoot
+  Serial.println("=== RECT: Side 3 @ 180° (TOF) ===");
+  executeDriveUntilCloseRect(180.0, STOP_DISTANCE_CM, false, true);
+  waitMs(pause_ms);
 
 
-// unsigned long startTime = millis();
+  executeTurn(-90);
+  waitMs(pause_ms);
+  executeDriveRect(800, -90.0);
+  waitMs(pause_ms);
+  executeTurn(0);
 
-//   float prevErr = 0.0;
-//   float integ   = 0.0;
-
-//   unsigned long lastPIDTime = millis();
-
-//   const float TARGET_HEADING = 0.0;
-
-//   bool shootTriggered = false;
-
-//   while (!matchTimeUp()) {
-
-//     unsigned long now = millis();
-//     unsigned long elapsed = now - startTime;
-
-//     // ----------------------------------------------------------
-//     // FIRST 550 ms
-//     // Drive forward at SPEED 220
-//     // Servo remains neutral
-//     // ----------------------------------------------------------
-//     if (elapsed < 250) {
-
-//       if (now - lastPIDTime >= FWD_INTERVAL) {
-
-//         lastPIDTime = now;
-
-//         runForwardPIDSpeed(
-//           TARGET_HEADING,
-//           prevErr,
-//           integ,
-//           220
-//         );
-//       }
-//     }
+  servoWrite(SERVO_NEUTRAL);
+  waitMs(pause_ms);
 
 
-//       else if (elapsed < 650) {
+  unsigned long startTime = millis();
 
-//       if (now - lastPIDTime >= FWD_INTERVAL) {
+  float prevErr = 0.0;
+  float integ   = 0.0;
 
-//         lastPIDTime = now;
+  unsigned long lastPIDTime = millis();
 
-//         runForwardPIDSpeed(
-//           20,
-//           prevErr,
-//           integ,
-//           220
-//         );
-//       }
-//     }
+  const float TARGET_HEADING = 0.0;
 
-//     // ----------------------------------------------------------
-//     // AFTER 550 ms
-//     // Servo -> SHOOT
-//     // Drive continuously at SPEED 60
-//     // Servo stays SHOOT until match ends
-//     // ----------------------------------------------------------
-//     else {
+  bool shootTriggered = false;
 
-//       // Move servo to shooting position ONCE
-//       if (!shootTriggered) {
+  while (!matchTimeUp()) {
 
-//         servoWrite(SERVO_SHOOT);
-//         shootTriggered = true;
+    unsigned long now = millis();
+    unsigned long elapsed = now - startTime;
 
-//         Serial.println("=== 550 ms REACHED ===");
-//         Serial.println("=== SERVO -> SHOOT ===");
-//         Serial.println("=== SPEED -> 60 ===");
-//       }
+    // ----------------------------------------------------------
+    // FIRST 550 ms
+    // Drive forward at SPEED 220
+    // Servo remains neutral
+    // ----------------------------------------------------------
+    if (elapsed < 250) {
 
-//       // Continue driving forward at 60
-//       if (now - lastPIDTime >= FWD_INTERVAL) {
+      if (now - lastPIDTime >= FWD_INTERVAL) {
 
-//         lastPIDTime = now;
+        lastPIDTime = now;
 
-//         runForwardPIDSpeed(
-//           10,
-//           prevErr,
-//           integ,
-//           60
-//         );
-//       }
-//     }
-
-//     // Intake NEVER stops
-//     intakeOn();
-//   }
-
-//   Serial.println("=== RECT3 COMPLETE — 50 SECOND MATCH ===");
+        runForwardPIDSpeed(
+          TARGET_HEADING,
+          prevErr,
+          integ,
+          220
+        );
+      }
+    }
 
 
-// }
+      else if (elapsed < 650) {
+
+      if (now - lastPIDTime >= FWD_INTERVAL) {
+
+        lastPIDTime = now;
+
+        runForwardPIDSpeed(
+          20,
+          prevErr,
+          integ,
+          220
+        );
+      }
+    }
+
+    // ----------------------------------------------------------
+    // AFTER 550 ms
+    // Servo -> SHOOT
+    // Drive continuously at SPEED 60
+    // Servo stays SHOOT until match ends
+    // ----------------------------------------------------------
+    else {
+
+      // Move servo to shooting position ONCE
+      if (!shootTriggered) {
+
+        servoWrite(SERVO_SHOOT);
+        shootTriggered = true;
+
+        Serial.println("=== 550 ms REACHED ===");
+        Serial.println("=== SERVO -> SHOOT ===");
+        Serial.println("=== SPEED -> 60 ===");
+      }
+
+      // Continue driving forward at 60
+      if (now - lastPIDTime >= FWD_INTERVAL) {
+
+        lastPIDTime = now;
+
+        runForwardPIDSpeed(
+          20,
+          prevErr,
+          integ,
+          70
+        );
+      }
+    }
+
+    // Intake NEVER stops
+    intakeOn();
+  }
+
+  Serial.println("=== RECT3 COMPLETE — 50 SECOND MATCH ===");
 
 
-void runRectangleLap() {   // ★ CHANGED signature: bool instead of void
+}
+
+
+bool runRectangleLap() {   // ★ CHANGED signature: bool instead of void
   intakeOn();
   servoWrite(SERVO_NEUTRAL);
 
@@ -815,13 +835,13 @@ void runRectangleLap() {   // ★ CHANGED signature: bool instead of void
   executeDriveUntilPixyRect(10.0, true, true);
   waitMs(pause_ms);
     // ★★★ ADD — stop exactly here if 25s has passed ★★★
-  // if (phase1TimeUp()) {
-  //   Serial.println("=== PHASE1 25s HIT — stopping at end of Side 3 ===");
-  //   motorsStop();
-  //   intakeOff();
-  //   servoWrite(SERVO_NEUTRAL);
-  //   return true;   // signal caller: stopped early, don't run another lap
-  // }
+  if (phase1TimeUp()) {
+    Serial.println("=== PHASE1 25s HIT — stopping at end of Side 3 ===");
+    motorsStop();
+    intakeOff();
+    servoWrite(SERVO_NEUTRAL);
+    return true;   // signal caller: stopped early, don't run another lap
+  }
 
 
   Serial.println("=== RECT: Turn 1 → -45° ===");
@@ -878,7 +898,7 @@ void runRectangleLap() {   // ★ CHANGED signature: bool instead of void
   waitMs(pause_ms);
 
   Serial.println("=== RECT: Lap complete ===");
-    // return false;   // ★ ADD — normal completion, keep looping in Phase 1
+    return false;   // ★ ADD — normal completion, keep looping in Phase 1
   
 }
 // ============================================================
@@ -1417,7 +1437,7 @@ void executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMid
     // }   
 
 
-    // ── Side3 servo shoot at 50ms ──────────────────────────
+        // ── Side3 servo shoot at 50ms ──────────────────────────
     if (reverseIntakeAtStart && !servoShot && elapsed >= 50) {
       servoWrite(SERVO_SHOOT);
       servoShot = true;
