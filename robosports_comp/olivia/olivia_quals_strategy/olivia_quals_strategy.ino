@@ -13,7 +13,12 @@ int lap3Counter = 0;   // counts laps; every 3rd lap uses shorter breadth_pause 
 int   lapCounter     = 0;    // counts laps for heading drift correction
 float headingOffset  = 0.0;  // added to all forward-drive headings every 5 laps
 float driftCorrection = 0.0;  // subtracted from heading every 2 laps
-
+// EMA state for purple ball zone classification
+float zone_ema_cx     = 0.0f;
+float zone_ema_cy     = 0.0f;
+bool  zone_ema_init   = false;
+#define ZONE_EMA_ALPHA      0.4f
+#define ZONE_OUTLIER_JUMP   30
 const unsigned long MATCH_DURATION_MS  = 120000;  // hard stop — safety net, unchanged
 const unsigned long PHASE1_LAP_END_MS  = 100000;  // ★ stop looping laps at this point
 const unsigned long PHASE2_START_MS    = 111000;  // ★ run runRectangleLap3() at this pointunsigned long matchStartTime = 0;
@@ -63,8 +68,8 @@ int         pause_ms           = 5;
 #define SIG3_FWD_SPEED      50     // detection speed for Side 1
 
 // --- Pixy2 zone detection ---
-#define SIG_PURPLE        2
-#define MIN_AREA          200
+#define SIG_PURPLE        1
+#define MIN_AREA          75
 #define ROI_TOP_Y         55
 // #define SPLIT_X           210
 // #define SPLIT_Y           79        // ★ TUNED from actual mat readings
@@ -77,7 +82,6 @@ int         pause_ms           = 5;
   #define SPLIT_Y   88
   #define DEAD_X    15
   #define DEAD_Y    4
-
 
 // --- Referee start toggle switch ---
 #define SWITCH_PWR              48
@@ -138,11 +142,55 @@ const float TRN_KP           = 5.0;
 const float TRN_KI           = 0.0;
 const float TRN_KD           = 0.8;
 const int   TRN_MIN_SPEED    = 60;
-const int   TRN_MAX_SPEED    = 255;
-const float TRN_DEADBAND     = 10.0;
+const int   TRN_MAX_SPEED    = 255; 
+const float TRN_DEADBAND     = 8.0;
 const int   TRN_INTERVAL     = 20;
 const int   TRN_STABLE_COUNT = 8;
 
+
+// --- Encoder ---
+#define ENC_A  4
+#define ENC_B  5
+volatile long encCount = 0;
+
+// Tune these after one test run
+long ENC_SIDE1_SLOW_COUNT = 400;   // 80% of trajectory — full speed below this
+long ENC_SIDE1_STOP_COUNT = 550;   // stop at this tick count
+long ENC_SIDE3_SLOW_COUNT = 400;
+long ENC_SIDE3_STOP_COUNT = 550;
+
+long ENC_END_SIDE3_SLOW_COUNT = 300;
+long ENC_END_SIDE3_STOP_COUNT = 400;
+
+// Side 2 encoder
+long ENC_SIDE2_SLOW_COUNT    = 150;       // non-const — saved/restored each call
+const long ENC_SIDE2_STOP_COUNT = 250;
+
+// Side 2 slow counts (used after every 3rd lap)
+long ENC_SIDE2_LAP3_SLOW_COUNT = 0;    // start slow immediately (no ramp)
+const long ENC_SIDE2_LAP3_STOP_COUNT = 200;  // stop earlier than normal 250
+const int  SIDE2_LAP3_SPEED = 80;           // slower speed after lap 3
+
+// Side 4 encoder
+const long ENC_SIDE4_SLOW_COUNT = 150;
+const long ENC_SIDE4_STOP_COUNT = 300;
+
+// Cross-lap flags
+bool firstLap          = true;   // first Side 2 always crawls at slow speed
+bool slowSide2NextLap  = false;  // set in lap3 block → next Side 2 crawls
+bool lap3Side1NextCall = false;  // set in lap3 block → next Side 1 crawls
+
+
+
+// --- Trajectory encoder tick counts (★ TUNE after first run) ---
+const long T1_ENC_PHASE1 = 250;
+const long T1_ENC_PHASE2 = 120;
+const long T2_ENC_PHASE1 = 250;
+const long T2_ENC_PHASE2 = 120;
+const long T3_ENC_PHASE1 = 300;
+const long T3_ENC_PHASE2 = 120;
+const long T4_ENC_PHASE1 = 250;
+const long T4_ENC_PHASE2 = 120;
 // ============================================================
 //  GLOBALS
 // ============================================================
@@ -179,7 +227,7 @@ void  runRectangleLapFromTurn1();
 void  runRectangleLapFromTurn3();
 void  runRectangleLapFromSide3();
 
-
+void executeDriveToEncoder(long targetTicks, float targetHeading, int speed);
 // void  runRectangleFromSide1();
 // void  runRectangleFromSide3();
 // void  runRectangleLap();
@@ -189,7 +237,7 @@ void  runRectangleLapFromSide3();
 void  executeDrive(unsigned long durationMs, float targetHeading);
 void  executeDriveUntilPixy(float targetHeading, bool shootMidway, bool useFullSpeedPhase);
 void  executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMidway, bool reverseIntakeAtStart = false);
-
+void executeDriveUntilEnc(float targetHeading, long stopCount, int speed);
 // --- Rectangle-lap-only slow variants (RECT_SPEED = 140) ---
 void  executeDriveRect(unsigned long durationMs, float targetHeading, bool reverseIntakeAtStart = false);
 void  executeDriveUntilPixyRect(float targetHeading, bool shootMidway, bool useFullSpeedPhase);
@@ -205,7 +253,7 @@ void  turnAntiClockwise(int speed);
 void  motorsStop();
 void  setMotorPins();
 void  waitMs(int ms);
-
+void executeDriveUntilEncRect(float targetHeading, long slowCount, long stopCount, int fastSpeed, int slowSpeed, bool reverseIntakeAtStart = false);
 void  initServo();
 void  servoWrite(int angle);
 void  initIntake();
@@ -246,6 +294,13 @@ bool matchTimeUp() {
   return false;
 }
 
+void IRAM_ATTR encoderISR() {
+  if (digitalRead(ENC_B) == HIGH) encCount++;
+  else                            encCount--;
+}
+
+void resetEncoder() { noInterrupts(); encCount = 0; interrupts(); }
+
 bool phase1TimeUp() {              // ★ ADD — 25s mark: stop lap loop
   return millis() - matchStartTime >= PHASE1_LAP_END_MS;
 }
@@ -273,6 +328,10 @@ void setup() {
   initStartSwitch();
 
   pixy.init();
+
+  pinMode(ENC_A, INPUT_PULLUP);
+pinMode(ENC_B, INPUT_PULLUP);
+attachInterrupt(digitalPinToInterrupt(ENC_A), encoderISR, RISING);
   pixy.changeProg("color_connected_components");
   Serial.println("Pixy2 Ready.");
 
@@ -280,17 +339,9 @@ void setup() {
   delay(500);
   zeroIMU();
 
+  // decidedZone is set live in waitForStartSwitch() — no pre-detection needed here
   decidedZone = UNKNOWN;
-  Serial.print("=== TRAJECTORY DECISION LOCKED IN: ");
-  switch (decidedZone) {
-    case TOP_LEFT:  Serial.println("TOP-LEFT ===");  break;
-    case BOT_LEFT:  Serial.println("BOT-LEFT ===");  break;
-    case TOP_RIGHT: Serial.println("TOP-RIGHT ==="); break;
-    case BOT_RIGHT: Serial.println("BOT-RIGHT ==="); break;
-    default:        Serial.println("UNKNOWN ===");   break;
-  }
-
-  setLedForZone(UNKNOWN);    // ← LED ON after detection, during wait
+  setLedForZone(UNKNOWN);
 
   waitForStartSwitch();
   matchStartTime = millis();      // ★ clock starts the instant the switch triggers
@@ -315,7 +366,7 @@ void loop() {
 //  30s    : matchTimeUp() hard-stops everything (safety net,
 //           still enforced inside every drive/turn function)
 // ============================================================
-void runLapsThenFinale() {
+void runLapsThenFinale () {
   // ── Phase 1: keep running laps; each lap decides for itself
   //             whether to stop right after Side 3 once 25s hits ──
   while (!matchTimeUp()) {
@@ -378,7 +429,16 @@ void runMission(Zone z) {
     runLapsThenFinale();
     return;
 
-  } else {
+  } 
+  // else {
+  //       runTrajectory4();
+  //   runRectangleLapFromTurn1();
+  //   runLapsThenFinale();
+  //   return;
+  // }
+  
+  
+  else {
     // runTrajectory1();
     // runRectangleLapFromTurn1();
     // while (true) { runRectangleLap2(); }
@@ -474,20 +534,33 @@ void waitForStartSwitch() {
   }
 }
 Zone samplePurpleOnce() {
-    pixy.ccc.getBlocks();
-    uint32_t bestArea = 0;
-    int bestCx = 0, bestCy = 0;
-    bool found = false;
-    for (int i = 0; i < pixy.ccc.numBlocks; i++) {
-        auto &b = pixy.ccc.blocks[i];
-        if (b.m_signature != SIG_PURPLE) continue;
-        if (b.m_y < ROI_TOP_Y) continue;
-        uint32_t area = (uint32_t)b.m_width * b.m_height;
-        if (area < MIN_AREA) continue;
-        if (area > bestArea) { bestArea = area; bestCx = b.m_x; bestCy = b.m_y; found = true; }
+  pixy.ccc.getBlocks();
+  uint32_t bestArea = 0;
+  int bestCx = 0, bestCy = 0;
+  bool found = false;
+  for (int i = 0; i < pixy.ccc.numBlocks; i++) {
+    auto &b = pixy.ccc.blocks[i];
+    if (b.m_signature != SIG_PURPLE) continue;
+    if (b.m_y < ROI_TOP_Y) continue;
+    uint32_t area = (uint32_t)b.m_width * b.m_height;
+    if (area < MIN_AREA) continue;
+    if (area > bestArea) { bestArea = area; bestCx = b.m_x; bestCy = b.m_y; found = true; }
+  }
+  if (!found) { zone_ema_init = false; return UNKNOWN; }
+
+  if (!zone_ema_init) {
+    zone_ema_cx = bestCx;
+    zone_ema_cy = bestCy;
+    zone_ema_init = true;
+  } else {
+    if (abs(bestCx - zone_ema_cx) > ZONE_OUTLIER_JUMP ||
+        abs(bestCy - zone_ema_cy) > ZONE_OUTLIER_JUMP) {
+      return UNKNOWN;  // outlier — discard this frame
     }
-    if (found) return classifyZone(bestCx, bestCy);
-    return UNKNOWN;
+    zone_ema_cx = ZONE_EMA_ALPHA * bestCx + (1.0f - ZONE_EMA_ALPHA) * zone_ema_cx;
+    zone_ema_cy = ZONE_EMA_ALPHA * bestCy + (1.0f - ZONE_EMA_ALPHA) * zone_ema_cy;
+  }
+  return classifyZone((int)zone_ema_cx, (int)zone_ema_cy);
 }
 // ============================================================
 //  detectPurpleBall()
@@ -543,16 +616,27 @@ Zone detectPurpleBall() {
   else                     return BOT_RIGHT;
 }
 
+struct ZoneCentroid { Zone z; int cx; int cy; };
+
 Zone classifyZone(int cx, int cy) {
-  bool isLeft  = cx < (SPLIT_X - DEAD_X);
-  bool isRight = cx > (SPLIT_X + DEAD_X);
-  bool isTop   = cy < (SPLIT_Y - DEAD_Y);
-  bool isBot   = cy > (SPLIT_Y + DEAD_Y);
-  if (isLeft  && isTop) return TOP_LEFT;
-  if (isLeft  && isBot) return BOT_LEFT;
-  if (isRight && isTop) return TOP_RIGHT;
-  if (isRight && isBot) return BOT_RIGHT;
-  return UNKNOWN;
+  // Centroids from actual Olivia camera readings
+  static const ZoneCentroid ZONE_CENTROIDS[4] = {
+    { TOP_LEFT,  160,  81 },
+    { BOT_LEFT,  155, 101 },
+    { TOP_RIGHT, 242,  86 },
+    { BOT_RIGHT, 263, 104 },
+  };
+  float bestDist = 1e9;
+  Zone  bestZone = UNKNOWN;
+  for (int i = 0; i < 4; i++) {
+    float dx = cx - ZONE_CENTROIDS[i].cx;
+    float dy = cy - ZONE_CENTROIDS[i].cy;
+    float dist = dx*dx + dy*dy;
+    if (dist < bestDist) { bestDist = dist; bestZone = ZONE_CENTROIDS[i].z; }
+  }
+  const float MAX_DIST_SQ = 40.0f * 40.0f;  // reject if >40px from any centroid
+  if (bestDist > MAX_DIST_SQ) return UNKNOWN;
+  return bestZone;
 }
 
 // ============================================================
@@ -566,67 +650,45 @@ Zone classifyZone(int cx, int cy) {
 void runTrajectory1() {
   Serial.println("=== TRAJECTORY 1 START ===");
   intakeOn();
-  servoWrite(SERVO_LOAD);   delay(500);
-  executeDrive(T1_PHASE1_MS, 0.0);
-  servoWrite(SERVO_NEUTRAL); 
-   delay(500);
-  executeDrive(T1_PHASE2_MS, 0.0);
-  motorsStop();             delay(T1_PAUSE_MS);
+  servoWrite(SERVO_LOAD); delay(500);
+  executeDriveToEncoder(T1_ENC_PHASE1, 0.0, T1_SPEED);
+  servoWrite(SERVO_NEUTRAL); delay(500);
+  executeDriveToEncoder(T1_ENC_PHASE2, 0.0, T1_SPEED);
+  motorsStop(); delay(T1_PAUSE_MS);
   servoWrite(SERVO_NEUTRAL); delay(250);
-  // executeDrive(T1_PHASE3_MS, 0.0);
   motorsStop(); intakeOff(); delay(200);
-  // servoWrite(SERVO_SHOOT);  delay(250);
-    Serial.println("T1: Pixy slow-crawl to wall...");
-  ema_init = false;
-executeDriveUntilPixy(0.0, false, false);   // no full speed — already mid-field
+  // ← Pixy crawl REMOVED — rectangle turn1 takes over immediately
   Serial.println("=== TRAJECTORY 1 DONE ===");
-  waitMs(pause_ms);
 }
 
 void runTrajectory2() {
   Serial.println("=== TRAJECTORY 2 START ===");
   intakeOn();
   servoWrite(SERVO_NEUTRAL); delay(250);
-  executeDrive(T2_PHASE1_MS, 0.0);
+  executeDriveToEncoder(T2_ENC_PHASE1, 0.0, T2_SPEED);
   motorsStop(); delay(150);
-  servoWrite(SERVO_SHOOT);   delay(250);
-  servoWrite(SERVO_LOAD);    delay(250);
-  executeDrive(T2_PHASE2_MS, 0.0);
+  servoWrite(SERVO_SHOOT); delay(250);
+  servoWrite(SERVO_LOAD);  delay(250);
+  executeDriveToEncoder(T2_ENC_PHASE2, 0.0, T2_SPEED);
   servoWrite(SERVO_NEUTRAL); delay(250);
   motorsStop();
-  waitMs(pause_ms);
-
-  // ── Slow Pixy crawl to Side1 wall ──
-  Serial.println("=== T2: Pixy crawl to Side1 wall ===");
-  ema_init = false;
-  executeDriveUntilPixy(0.0, false, false);  // no shoot, no full-speed phase
-
+  // ← Pixy crawl REMOVED
   Serial.println("=== TRAJECTORY 2 DONE ===");
-  
 }
 
 void runTrajectory3() {
   Serial.println("=== TRAJECTORY 3 START ===");
-  executeTurn(30.0); 
-  waitMs(pause_ms);
-    intakeOn();
-  servoWrite(SERVO_LOAD);   delay(500);
-  executeDrive(T3_PHASE1_MS, 30.0);
-  servoWrite(SERVO_NEUTRAL); 
-   delay(500);
-  executeDrive(T1_PHASE2_MS, 0.0);
-  motorsStop();             delay(T1_PAUSE_MS);
+  executeTurn(30.0); waitMs(pause_ms);
+  intakeOn();
+  servoWrite(SERVO_LOAD); delay(500);
+  executeDriveToEncoder(T3_ENC_PHASE1, 30.0, T3_SPEED);
+  servoWrite(SERVO_NEUTRAL); delay(500);
+  executeDriveToEncoder(T3_ENC_PHASE2, 0.0, T3_SPEED);
+  motorsStop(); delay(T3_PAUSE_MS);
   servoWrite(SERVO_NEUTRAL); delay(250);
-  // executeDrive(T1_PHASE3_MS, 0.0);
   motorsStop(); intakeOff(); delay(200);
-  
-  // servoWrite(SERVO_SHOOT);  delay(250);
-    Serial.println("T1: Pixy slow-crawl to wall...");
-  ema_init = false;
-executeDriveUntilPixy(5.0, false, false); 
+  // ← Pixy crawl REMOVED
   Serial.println("=== TRAJECTORY 3 DONE ===");
-    waitMs(pause_ms);
-
 }
 
 void runTrajectory4() {
@@ -634,23 +696,17 @@ void runTrajectory4() {
   executeTurn(30.0); waitMs(pause_ms);
   intakeOn();
   servoWrite(SERVO_NEUTRAL); delay(250);
-  executeDrive(T4_PHASE1_MS, 30.0);
+  executeDriveToEncoder(T4_ENC_PHASE1, 30.0, T4_SPEED);
   motorsStop(); delay(150);
-  servoWrite(SERVO_SHOOT);   delay(250);
-  servoWrite(SERVO_LOAD);    delay(250);
-  executeDrive(T4_PHASE2_MS, 0.0);
+  servoWrite(SERVO_SHOOT); delay(250);
+  servoWrite(SERVO_LOAD);  delay(250);
+  executeDriveToEncoder(T4_ENC_PHASE2, 0.0, T4_SPEED);
   servoWrite(SERVO_NEUTRAL); delay(250);
   motorsStop();
-  // executeTurn(180.0); waitMs(pause_ms);
-  waitMs(pause_ms);
-
-  // ── TOF crawl to Side3 wall at 180° ──
-  ema_init = false;
-  executeDriveUntilPixy(5.0, false, false);  // no shoot, no full-speed phase
-
-
+  // ← Pixy crawl REMOVED
   Serial.println("=== TRAJECTORY 4 DONE ===");
 }
+
 
 void runForwardPIDSpeed(float targetHeading, float &prevErr, float &integ, const int speed) {
   float heading = getHeading();
@@ -715,11 +771,11 @@ void runRectangleLap3() {
   executeTurn(-145.0);
   waitMs(pause_ms);
 
-  // SIDE 3 — TOF, no shoot
-  Serial.println("=== RECT: Side 3 @ 180° (TOF) ===");
-  executeDriveUntilCloseRect(180.0, STOP_DISTANCE_CM, false, true);
+  // SIDE 3 — encoder, no shoot (matches runRectangleLap exact)
+  Serial.println("=== RECT: Side 3 @ 180° (encoder) ===");
+  resetEncoder();
+  executeDriveUntilEncRect(180.0, ENC_END_SIDE3_SLOW_COUNT, ENC_END_SIDE3_STOP_COUNT, FWD_BASE_SPEED, RECT_SPEED);
   waitMs(pause_ms);
-
 
   executeTurn(-90);
   waitMs(pause_ms);
@@ -831,10 +887,10 @@ bool runRectangleLap() {   // ★ CHANGED signature: bool instead of void
   servoWrite(SERVO_NEUTRAL);
 
   // SIDE 1 — Pixy sig3, shoot midway, full-speed phase ON
-  Serial.println("=== RECT: Side 1 @ 0° (Pixy stop, shoot midway) ===");
-  ema_init = false;
-  executeDriveUntilPixyRect(10.0, true, true);
-  waitMs(pause_ms);
+Serial.println("=== RECT: Side 1 @ 0° (encoder) ===");
+resetEncoder();
+executeDriveUntilEncRect(0.0, ENC_SIDE1_SLOW_COUNT, ENC_SIDE1_STOP_COUNT, FWD_BASE_SPEED, RECT_SPEED);
+waitMs(pause_ms);
     // ★★★ ADD — stop exactly here if 25s has passed ★★★
   if (phase1TimeUp()) {
     Serial.println("=== PHASE1 25s HIT — stopping at end of Side 3 ===");
@@ -857,9 +913,25 @@ bool runRectangleLap() {   // ★ CHANGED signature: bool instead of void
   }
   waitMs(pause_ms);
 
-  Serial.println("=== RECT: Side 2 @ -90° (time) ===");
-  executeDriveRect(breadth_pause, -85.0);
-  waitMs(pause_ms);
+Serial.println("=== RECT: Side 2 @ -90° (encoder) ===");
+{
+  long slowCount, stopCount;
+  int side2Speed;
+  if (firstLap || slowSide2NextLap) {
+    slowCount  = ENC_SIDE2_LAP3_SLOW_COUNT;
+    stopCount  = ENC_SIDE2_LAP3_STOP_COUNT;
+    side2Speed = SIDE2_LAP3_SPEED;
+    if (firstLap) firstLap = false;
+    if (slowSide2NextLap) slowSide2NextLap = false;
+  } else {
+    slowCount  = ENC_SIDE2_SLOW_COUNT;
+    stopCount  = ENC_SIDE2_STOP_COUNT;
+    side2Speed = RECT_SPEED_2;
+  }
+  resetEncoder();
+  executeDriveUntilEncRect(-85.0, slowCount, stopCount, FWD_BASE_SPEED, side2Speed);
+}
+waitMs(pause_ms);
 
   intakeSlowed();
   waitMs(pause_ms);
@@ -874,25 +946,31 @@ bool runRectangleLap() {   // ★ CHANGED signature: bool instead of void
 
   // SIDE 3 — TOF, no shoot
   Serial.println("=== RECT: Side 3 @ 180° (TOF) ===");
-  executeDriveUntilCloseRect(180.0, STOP_DISTANCE_CM, false, false);
+  resetEncoder();
+executeDriveUntilEncRect(180.0, ENC_SIDE3_SLOW_COUNT, ENC_SIDE3_STOP_COUNT, FWD_BASE_SPEED, RECT_SPEED);
   waitMs(pause_ms);
 
 
   Serial.println("=== RECT: Turn 3 → 135° ===");
-  executeTurn(135.0);
+  executeTurn(130.0);
   waitMs(pause_ms);
 
-  lap3Counter++;
-  int side4Duration = breadth_pause;
-  if (lap3Counter >= 3) {
-    side4Duration = 400;
-    lap3Counter = 0;
-    Serial.println("=== LAP 3 SPECIAL: Side 4 shortened ===");
-  }
+lap3Counter++;
+long side4SlowCount = ENC_SIDE4_SLOW_COUNT;
+long side4StopCount = ENC_SIDE4_STOP_COUNT;
+if (lap3Counter >= 3) {
+  side4SlowCount = 60;
+  side4StopCount = 80;
+  lap3Counter    = 0;
+  slowSide2NextLap  = true;
+  // lap3Side1NextCall = true;
+  Serial.println("=== LAP 3 SPECIAL: Side 4 shortened ===");
+}
 
-  Serial.println("=== RECT: Side 4 @ 90° (time) ===");
-  executeDriveRect(side4Duration, 100.0, true);
-  waitMs(pause_ms);
+Serial.println("=== RECT: Side 4 @ 90° (encoder) ===");
+resetEncoder();
+executeDriveUntilEncRect(100.0, side4SlowCount, side4StopCount, FWD_BASE_SPEED, RECT_SPEED_2, true);
+waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 4 → 45° ===");
   executeTurn(30.0);
@@ -993,9 +1071,40 @@ if (lapCounter >= 2) {
 
   waitMs(pause_ms);
 
-  Serial.println("=== RECT(T1): Side 2 @ -90° (time) ===");
-  executeDriveRect(breadth_pause, -85.0);
-  waitMs(pause_ms);
+// Serial.println("=== RECT(T1): Side 2 @ -90° (encoder) ===");
+// {
+//   long savedSide2Slow = ENC_SIDE2_SLOW_COUNT;
+//   bool side2Slow = (firstLap || slowSide2NextLap);
+//   if (side2Slow) ENC_SIDE2_SLOW_COUNT = 0;
+//   int side2Speed = side2Slow ? 100 : RECT_SPEED_2;
+//   if (firstLap) firstLap = false;
+//   if (slowSide2NextLap) slowSide2NextLap = false;
+//   resetEncoder();
+//   executeDriveUntilEncRect(-85.0, ENC_SIDE2_SLOW_COUNT, ENC_SIDE2_STOP_COUNT, FWD_BASE_SPEED, side2Speed);
+//   ENC_SIDE2_SLOW_COUNT = savedSide2Slow;
+// }
+
+
+
+Serial.println("=== RECT: Side 2 @ -90° (encoder) ===");
+{
+  long slowCount, stopCount;
+  int side2Speed;
+  if (firstLap || slowSide2NextLap) {
+    slowCount  = ENC_SIDE2_LAP3_SLOW_COUNT;
+    stopCount  = ENC_SIDE2_LAP3_STOP_COUNT;
+    side2Speed = SIDE2_LAP3_SPEED;
+    if (firstLap) firstLap = false;
+    if (slowSide2NextLap) slowSide2NextLap = false;
+  } else {
+    slowCount  = ENC_SIDE2_SLOW_COUNT;
+    stopCount  = ENC_SIDE2_STOP_COUNT;
+    side2Speed = RECT_SPEED_2;
+  }
+  resetEncoder();
+  executeDriveUntilEncRect(-85.0, slowCount, stopCount, FWD_BASE_SPEED, side2Speed);
+}
+waitMs(pause_ms);
 
   Serial.println("=== RECT(T1): Turn 2 → -135° ===");
   executeTurn(-145.0);
@@ -1003,23 +1112,29 @@ if (lapCounter >= 2) {
 
   // SIDE 3 — TOF, no shoot
   Serial.println("=== RECT(T1): Side 3 @ 180° (TOF) ===");
-executeDriveUntilCloseRect(180.0, STOP_DISTANCE_CM, false, false);  waitMs(pause_ms);
+resetEncoder();
+executeDriveUntilEncRect(180.0, ENC_SIDE3_SLOW_COUNT, ENC_SIDE3_STOP_COUNT, FWD_BASE_SPEED, RECT_SPEED);
+ waitMs(pause_ms);
 
   Serial.println("=== RECT(T1): Turn 3 → 135° ===");
-  executeTurn(135.0);
+  executeTurn(130.0);
   waitMs(pause_ms);
+lap3Counter++;
+long side4SlowCount = ENC_SIDE4_SLOW_COUNT;
+long side4StopCount = ENC_SIDE4_STOP_COUNT;
+if (lap3Counter >= 3) {
+  side4SlowCount = 60;
+  side4StopCount = 80;
+  lap3Counter    = 0;
+  slowSide2NextLap  = true;
+  // lap3Side1NextCall = true;
+  Serial.println("=== LAP 3 SPECIAL: Side 4 shortened ===");
+}
 
-    lap3Counter++;                          // ← increment here
-  int side4Duration = breadth_pause;      // default
-  if (lap3Counter >= 3) {
-    side4Duration = 400;                  // shorter on every 3rd lap
-    lap3Counter = 0;                      // reset counter
-    Serial.println("=== LAP 3 SPECIAL: Side 4 shortened ===");
-  }
-
-  Serial.println("=== RECT(T1): Side 4 @ 90° (time) ===");
-executeDriveRect(side4Duration, 95.0, true);
-  waitMs(pause_ms);
+Serial.println("=== RECT(T1): Side 4 @ 90° (encoder) ===");
+resetEncoder();
+executeDriveUntilEncRect(95.0, side4SlowCount, side4StopCount, FWD_BASE_SPEED, RECT_SPEED_2, true);
+waitMs(pause_ms);
 
   Serial.println("=== RECT(T1): Turn 4 → 45° ===");
   executeTurn(30.0);
@@ -1041,7 +1156,7 @@ void runRectangleLapFromTurn3() {
 
 
   Serial.println("=== RECT(T3): Turn 3 → 135° ===");
-  executeTurn(135.0);
+  executeTurn(130.0);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T3): Side 4 @ 90° (time) ===");
@@ -1054,8 +1169,8 @@ executeDriveRect(breadth_pause, 95.0, true);
 
   // SIDE 1 — Pixy sig3, shoot midway, full-speed phase ON
   Serial.println("=== RECT(T3): Side 1 @ 0° (Pixy stop, shoot midway) ===");
-  ema_init = false;
-  executeDriveUntilPixyRect(10.0, true, true);
+resetEncoder();
+executeDriveUntilEncRect(0.0, ENC_SIDE1_SLOW_COUNT, ENC_SIDE1_STOP_COUNT, FWD_BASE_SPEED, RECT_SPEED);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(T3): Turn 1 → -45° ===");
@@ -1072,9 +1187,16 @@ if (lapCounter >= 2) {
 
   waitMs(pause_ms);
 
-  Serial.println("=== RECT(T3): Side 2 @ -90° (time) ===");
-  executeDriveRect(breadth_pause, -85.0);
-  waitMs(pause_ms);
+Serial.println("=== RECT(T3): Side 2 @ -90° (encoder) ===");
+{
+  long slowCount = slowSide2NextLap ? ENC_SIDE2_LAP3_SLOW_COUNT : ENC_SIDE2_SLOW_COUNT;
+  long stopCount = slowSide2NextLap ? ENC_SIDE2_LAP3_STOP_COUNT : ENC_SIDE2_STOP_COUNT;
+  int side2Speed = slowSide2NextLap ? SIDE2_LAP3_SPEED : RECT_SPEED_2;
+  if (slowSide2NextLap) slowSide2NextLap = false;
+  resetEncoder();
+  executeDriveUntilEncRect(-85.0, slowCount, stopCount, FWD_BASE_SPEED, side2Speed);
+}
+waitMs(pause_ms);
 
   Serial.println("=== RECT(T3): Turn 2 → -135° ===");
   executeTurn(-145.0);
@@ -1096,10 +1218,13 @@ void runRectangleLapFromSide3() {
 
   // SIDE 3 — TOF, no shoot
   Serial.println("=== RECT(S3): Side 3 @ 180° (TOF) ===");
-executeDriveUntilCloseRect(180.0, STOP_DISTANCE_CM, false, false);  waitMs(pause_ms);
+resetEncoder();
+executeDriveUntilEncRect(180.0, ENC_SIDE3_SLOW_COUNT, ENC_SIDE3_STOP_COUNT, FWD_BASE_SPEED, RECT_SPEED);
+waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 3 → 135° ===");
-  executeTurn(135.0);
+  executeTurn(130.0);
+
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Side 4 @ 90° (time) ===");
@@ -1112,8 +1237,8 @@ executeDriveUntilCloseRect(180.0, STOP_DISTANCE_CM, false, false);  waitMs(pause
 
   // SIDE 1 — Pixy sig3, shoot midway, full-speed phase ON
   Serial.println("=== RECT(S3): Side 1 @ 0° (Pixy stop, shoot midway) ===");
-  ema_init = false;
-  executeDriveUntilPixyRect(10.0, true, true);
+resetEncoder();
+executeDriveUntilEncRect(0.0, ENC_SIDE1_SLOW_COUNT, ENC_SIDE1_STOP_COUNT, FWD_BASE_SPEED, RECT_SPEED);
   waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 1 → -45° ===");
@@ -1130,9 +1255,16 @@ if (lapCounter >= 2) {
 
   waitMs(pause_ms);
 
-  Serial.println("=== RECT(S3): Side 2 @ -90° (time) ===");
-  executeDriveRect(breadth_pause, -85.0);
-  waitMs(pause_ms);
+Serial.println("=== RECT(S3): Side 2 @ -90° (encoder) ===");
+{
+  long slowCount = slowSide2NextLap ? ENC_SIDE2_LAP3_SLOW_COUNT : ENC_SIDE2_SLOW_COUNT;
+  long stopCount = slowSide2NextLap ? ENC_SIDE2_LAP3_STOP_COUNT : ENC_SIDE2_STOP_COUNT;
+  int side2Speed = slowSide2NextLap ? SIDE2_LAP3_SPEED : RECT_SPEED_2;
+  if (slowSide2NextLap) slowSide2NextLap = false;
+  resetEncoder();
+  executeDriveUntilEncRect(-85.0, slowCount, stopCount, FWD_BASE_SPEED, side2Speed);
+}
+waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 2 → -135° ===");
   executeTurn(-145.0);
@@ -1398,6 +1530,96 @@ void executeDriveRect(unsigned long durationMs, float targetHeading, bool revers
   }
   motorsStop();
 }
+
+// void executeDriveUntilEncRect(float targetHeading, long slowCount, long stopCount, int fastSpeed, int slowSpeed) {
+//   float prevErr = 0.0;
+//   float integ   = 0.0;
+//   unsigned long lastPIDTime = millis();
+//   unsigned long startTime   = millis();
+//   const unsigned long MAX_TIMEOUT = 4000;
+
+//   while (true) {
+//     if (matchTimeUp()) { motorsStop(); intakeOff(); servoWrite(SERVO_SHOOT); return; }
+
+//     unsigned long now = millis();
+//     if (now - startTime > MAX_TIMEOUT) {
+//       Serial.println("ENC: MAX TIMEOUT — stopping.");
+//       break;
+//     }
+
+//     if (now - lastPIDTime >= FWD_INTERVAL) {
+//       lastPIDTime = now;
+//       long ticks = abs(encCount);
+//       Serial.print("ENC | ticks: "); Serial.println(ticks);
+
+//       if (ticks >= stopCount) {
+//         Serial.println("ENC → STOP");
+//         break;
+//       }
+
+//       int currentSpeed = (ticks < slowCount) ? fastSpeed : slowSpeed;
+//       runForwardPID(targetHeading, prevErr, integ, currentSpeed);
+//     }
+//   }
+//   motorsStop();
+// }
+
+
+
+
+void executeDriveUntilEncRect(float targetHeading, long slowCount, long stopCount,
+                               int fastSpeed, int slowSpeed,
+                               bool reverseIntakeAtStart) {
+  float prevErr = 0.0;
+  float integ   = 0.0;
+  unsigned long lastPIDTime = millis();
+  unsigned long startTime   = millis();
+  const unsigned long MAX_TIMEOUT = 1500;
+
+  bool intakeSwitched = false;
+  bool servoShot      = false;
+
+  if (reverseIntakeAtStart) intakeReverseSlowed();
+
+  while (true) {
+    if (matchTimeUp()) { motorsStop(); intakeOff(); servoWrite(SERVO_SHOOT); return; }
+
+    unsigned long now     = millis();
+    unsigned long elapsed = now - startTime;
+
+    if (now - startTime > MAX_TIMEOUT) {
+      Serial.println("ENC: MAX TIMEOUT — stopping.");
+      break;
+    }
+
+    if (reverseIntakeAtStart && !servoShot && elapsed >= 50) {
+      servoWrite(SERVO_SHOOT);
+      servoShot = true;
+    }
+    if (reverseIntakeAtStart && !intakeSwitched && elapsed >= 500) {
+      intakeOn();
+      servoWrite(SERVO_NEUTRAL);
+      intakeSwitched = true;
+    }
+
+    if (now - lastPIDTime >= FWD_INTERVAL) {
+      lastPIDTime = now;
+      long ticks = abs(encCount);
+      Serial.print("ENC | ticks: "); Serial.println(ticks);
+
+      if (ticks >= stopCount) {
+        Serial.println("ENC → STOP");
+        break;
+      }
+
+      int currentSpeed = (ticks < slowCount) ? fastSpeed : slowSpeed;
+      runForwardPID(targetHeading, prevErr, integ, currentSpeed);
+    }
+  }
+  motorsStop();
+}
+
+
 // ============================================================
 //  executeDriveUntilClose() — Side 3 (TOF)  [ORIGINAL — used by runTrajectory1-4]
 // ============================================================
@@ -1406,7 +1628,7 @@ void executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMid
   float integ   = 0.0;
   unsigned long lastPIDTime  = millis();
   unsigned long startTime    = millis();
-  const unsigned long MAX_TIMEOUT = 4000;
+  const unsigned long MAX_TIMEOUT = 1500;
 
   bool intakeSwitched = false;
     bool servoShot       = false;          // ← ADD
@@ -1533,6 +1755,65 @@ void executeDriveBackward(unsigned long durationMs, float targetHeading) {
   }
   motorsStop();
 }
+
+// ============================================================
+//  executeDriveToEncoder()
+//  Drive at `speed` until `targetTicks` encoder counts.
+//  Resets encoder internally — caller never needs resetEncoder().
+// ============================================================
+void executeDriveToEncoder(long targetTicks, float targetHeading, int speed) {
+  resetEncoder();   // ← internal reset, no manual reset needed between phases
+  float prevErr = 0.0, integ = 0.0;
+  unsigned long lastPIDTime = millis();
+  unsigned long startTime   = millis();
+  const unsigned long MAX_TIMEOUT = 5000;
+
+  while (true) {
+    if (matchTimeUp()) { motorsStop(); intakeOff(); servoWrite(SERVO_SHOOT); return; }
+    if (millis() - startTime > MAX_TIMEOUT) {
+      Serial.println("DTE: TIMEOUT — stopping.");
+      break;
+    }
+    unsigned long now = millis();
+    if (now - lastPIDTime >= FWD_INTERVAL) {
+      lastPIDTime = now;
+      long ticks = abs(encCount);
+      Serial.print("DTE | "); Serial.print(ticks);
+      Serial.print("/"); Serial.println(targetTicks);
+      if (ticks >= targetTicks) { Serial.println("DTE → STOP"); break; }
+      runForwardPID(targetHeading, prevErr, integ, speed);
+    }
+  }
+  motorsStop();
+}
+// ============================================================
+//  executeDriveUntilEnc()  — used by runTrajectory1-4 only
+//  Single-speed encoder drive (no slow phase — trajectory dashes are short)
+// ============================================================
+void executeDriveUntilEnc(float targetHeading, long stopCount, int speed) {
+  float prevErr = 0.0;
+  float integ   = 0.0;
+  unsigned long lastPIDTime = millis();
+  unsigned long startTime   = millis();
+  const unsigned long MAX_TIMEOUT = 5000;
+
+  while (true) {
+    if (matchTimeUp()) { motorsStop(); intakeOff(); servoWrite(SERVO_SHOOT); return; }
+    unsigned long now = millis();
+    if (now - startTime > MAX_TIMEOUT) {
+      Serial.println("ENC_T: MAX TIMEOUT — stopping.");
+      break;
+    }
+    if (now - lastPIDTime >= FWD_INTERVAL) {
+      lastPIDTime = now;
+      long ticks = abs(encCount);
+      Serial.print("ENC_T | ticks: "); Serial.println(ticks);
+      if (ticks >= stopCount) { Serial.println("ENC_T → STOP"); break; }
+      runForwardPID(targetHeading, prevErr, integ, speed);
+    }
+  }
+  motorsStop();
+}
 // ============================================================
 //  executeDriveUntilCloseRect() — Side 3 (TOF)  [RECTANGLE-ONLY — RECT_SPEED = 140]
 // ============================================================
@@ -1541,7 +1822,7 @@ void executeDriveUntilCloseRect(float targetHeading, float stopDistCm, bool shoo
   float integ   = 0.0;
   unsigned long lastPIDTime  = millis();
   unsigned long startTime    = millis();
-  const unsigned long MAX_TIMEOUT = 4000;
+  const unsigned long MAX_TIMEOUT = 1500;
 
   bool intakeSwitched = false;
     bool servoShot       = false;
@@ -1616,22 +1897,24 @@ void executeDriveUntilCloseRect(float targetHeading, float stopDistCm, bool shoo
 // ============================================================
 //  executeTurn()
 // ============================================================
-void executeTurn(float targetAngle, bool shootDuringTurn) {  float prevErr     = 0.0;
+void executeTurn(float targetAngle, bool shootDuringTurn) {
+  float prevErr     = 0.0;
   float integ       = 0.0;
   int   stableCount = 0;
   unsigned long lastPIDTime = millis();
 
   if (shootDuringTurn) {
-    intakeReverse();            // ← revrses immediately as turn begins
+    intakeReverse();
     Serial.println("SHOOT triggered during Turn 1");
   }
 
   while (true) {
-        if (matchTimeUp()) { motorsStop(); intakeOff(); servoWrite(SERVO_SHOOT); return; }   // ★ ADD
+    if (matchTimeUp()) { motorsStop(); intakeOff(); servoWrite(SERVO_SHOOT); return; }
 
     unsigned long now = millis();
     if (now - lastPIDTime >= TRN_INTERVAL) {
       lastPIDTime = now;
+
       float heading = getHeading();
       float error   = shortestError(targetAngle, heading);
 
@@ -1639,10 +1922,12 @@ void executeTurn(float targetAngle, bool shootDuringTurn) {  float prevErr     =
         motorsStop();
         integ = 0.0; prevErr = error;
         stableCount++;
-        if (stableCount >= TRN_STABLE_COUNT) {
-          Serial.print("Turn done. H:"); Serial.println(heading, 1);
-          return;
-        }
+        Serial.print("Stable "); Serial.print(stableCount);
+        Serial.print("/"); Serial.print(TRN_STABLE_COUNT);
+        Serial.print(" | H:"); Serial.print(heading, 1);
+        Serial.print(" E:"); Serial.println(error, 1);
+        Serial.print("Turn done. H:"); Serial.println(heading, 1);
+        return;   // ← exit on FIRST stable frame, exactly like Shawn
       } else {
         stableCount = 0;
         runTurnPID(targetAngle, prevErr, integ);

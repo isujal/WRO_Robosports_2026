@@ -4,7 +4,7 @@ Pixy2SPI_SS pixy;
 
 #define SIG_PURPLE  1
 #define MIN_AREA    75
-#define ROI_TOP_Y   40   // ← blobs with cy < this are ignored
+#define ROI_TOP_Y   55   // ← blobs with cy < this are ignored
 
 void setup() {
   Serial.begin(115200);

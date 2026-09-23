@@ -6,8 +6,8 @@
 //  Encoder GND → GND
 // ============================================================
 
-#define ENC_A  36 //4
-#define ENC_B  35 //5
+#define ENC_A  4 //4
+#define ENC_B  5 //5
 
 volatile long encCount = 0;
 

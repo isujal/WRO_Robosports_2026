@@ -53,6 +53,7 @@ const unsigned long PHASE2_DURATION_MS = 105000; //108000; // was 35000 — phas
 const unsigned long PHASE3_START_MS    = 110000; //116000; // ← ADD — phase 3 doesn't begin until here
 
 bool lap3CounterResetForPhase2 = false; // was lapCounterResetForPhase2
+bool lap3Side1NextCall = false;  // set in lap3 block → next Side 1 uses lap3 encoder counts
 // --- Referee start toggle switch ---
 #define SWITCH_PWR              48
 #define SWITCH_SIG              47
@@ -141,8 +142,8 @@ constexpr uint8_t  SERVO_PWM_RES  = 14;
 constexpr uint16_t SERVO_MIN_DUTY = (uint16_t)((500  * 16384L) / 20000);
 constexpr uint16_t SERVO_MAX_DUTY = (uint16_t)((2400 * 16384L) / 20000);
 
-const int SERVO_NEUTRAL = 20;
-const int SERVO_SHOOT   = 65;
+const int SERVO_NEUTRAL = 10;
+const int SERVO_SHOOT   = 50;
 const int SERVO_LOAD    = 140;
 
 // ============================================================
@@ -187,9 +188,10 @@ volatile long encCount = 0;
 // const long ENC_SIDE3_SLOW_COUNT  = 600;   // ticks before slowing down on Side 3
 // const long ENC_SIDE3_STOP_COUNT  = 750;   // ticks to stop on Side 3
 
-long ENC_SIDE2_SLOW_COUNT  = 120;   // ticks before slowing on Side 2 (breadth)
-const long ENC_SIDE2_STOP_COUNT  = 250;   // ticks to stop on Side 2
-const long ENC_SIDE4_SLOW_COUNT  = 220;   // ticks before slowing on Side 4 (breadth)
+
+long ENC_SIDE2_SLOW_COUNT  = 160;   // ticks before slowing on Side 2 (breadth)
+const long ENC_SIDE2_STOP_COUNT  = 290;   // ticks to stop on Side 2
+const long ENC_SIDE4_SLOW_COUNT  = 190;   // ticks before slowing on Side 4 (breadth)
 const long ENC_SIDE4_STOP_COUNT  = 290;   // ticks to stop on Side 4
 
 bool firstLap = false;
@@ -212,10 +214,14 @@ const long T4_ENC_PHASE2 = 250;   // was T4_PHASE2_MS=400
 
 // was: const long ENC_SIDE1_SLOW_COUNT = 600;
 // was: const long ENC_SIDE1_STOP_COUNT = 750;
-long ENC_SIDE1_SLOW_COUNT = 600;
+long ENC_SIDE1_SLOW_COUNT = 550;
 long ENC_SIDE1_STOP_COUNT = 750;
-long ENC_SIDE3_SLOW_COUNT  = 600;   // ticks before slowing down on Side 3
+long ENC_SIDE3_SLOW_COUNT  = 550;   // ticks before slowing down on Side 3
 long ENC_SIDE3_STOP_COUNT  = 750;
+
+// ★ LAP3 Side 1 separate encoder counts (tune independently)
+long ENC_SIDE1_LAP3_SLOW_COUNT = 500;   // ★ TUNE: slow threshold for lap3 Side 1
+long ENC_SIDE1_LAP3_STOP_COUNT = 700;   // ★ TUNE: stop count for lap3 Side 1
 // ============================================================
 //  GLOBALS
 // ============================================================
@@ -253,7 +259,7 @@ void  executeDriveUntilClose(float targetHeading, float stopDistCm, bool shootMi
 // NOTE: this prototype was previously commented out, which is why the
 // definition further down was never being wired into the rectangle calls.
 void  executeDriveSpeed(unsigned long durationMs, float targetHeading, const int speed);
-void  executeDriveUntilCloseSpeed(float targetHeading, float stopDistCm, bool shootMidway, bool reverseIntakeAtStart, const int speed, unsigned long shootDelayMs = 850);
+void  executeDriveUntilCloseSpeed(float targetHeading, float stopDistCm, bool shootMidway, bool reverseIntakeAtStart, const int speed, unsigned long shootDelayMs = 900);
 void  runForwardPIDSpeed(float targetHeading, float &prevErr, float &integ, const int speed);
 void  executeDriveUntilEncSpeed(float targetHeading, long slowCount, long stopCount, int fastSpeed, int slowSpeed);
 void  executeTurn(float targetAngle);
@@ -369,29 +375,39 @@ void loop() {
     runTrajectory1();
     rectPhaseStartTime = millis();
     lap3CounterResetForPhase2 = false;
+    slowSide2NextLap = true;   // first-lap Side 2 slow even without a trajectory
+
     while (true) { runRectangleLap(); }
 
   } else if (decidedZone == TOP_LEFT) {
     runTrajectory2();
     rectPhaseStartTime = millis();
     lap3CounterResetForPhase2 = false;
+    slowSide2NextLap = true;   // first-lap Side 2 slow even without a trajectory
+
     while (true) { runRectangleLap(); }
 
   } else if (decidedZone == BOT_RIGHT) {
     runTrajectory3();
     rectPhaseStartTime = millis();
     lap3CounterResetForPhase2 = false;
+    slowSide2NextLap = true;   // first-lap Side 2 slow even without a trajectory
+
     while (true) { runRectangleLapFromSide3(); }
 
   } else if (decidedZone == TOP_RIGHT) {
     runTrajectory4();
     rectPhaseStartTime = millis();
     lap3CounterResetForPhase2 = false;
+    slowSide2NextLap = true;   // first-lap Side 2 slow even without a trajectory
+
     while (true) { runRectangleLapFromSide3(); }
 
   } else {
     rectPhaseStartTime = millis();
     lap3CounterResetForPhase2 = false;
+    slowSide2NextLap = true;   // first-lap Side 2 slow even without a trajectory
+
     while (true) { runRectangleLap(); }
   }
 }
@@ -635,7 +651,8 @@ executeDriveToEncoder(T1_ENC_PHASE3, 0.0, 100);
   delay(250);
 
   Serial.println("=== TRAJECTORY 1 DONE ===");
-    firstLap = true;   // ← ADD
+    firstLap = true;
+    slowSide2NextLap = true;   // ensures Side 2 slow on first lap
 
   waitMs(pause_ms);
 }
@@ -789,7 +806,8 @@ executeDriveToEncoder(T2_ENC_PHASE2, 0.0, 200);
   motorsStop();
 
   Serial.println("=== TRAJECTORY 2 DONE ===");
-    firstLap = true;   // ← ADD
+    firstLap = true;
+    slowSide2NextLap = true;   // ensures Side 2 slow on first lap
 
   waitMs(pause_ms);
 }
@@ -867,7 +885,8 @@ executeDriveToEncoder(T3_ENC_PHASE3, 30.0, 100);
   waitMs(pause_ms);
 
   Serial.println("=== TRAJECTORY 3 DONE ===");
-    firstLap = true;   // ← ADD
+    firstLap = true;
+    slowSide2NextLap = true;   // ensures Side 2 slow on first lap
 
   waitMs(pause_ms);
 }
@@ -938,7 +957,8 @@ executeDriveToEncoder(T4_ENC_PHASE2, 30.0, 200);
   waitMs(pause_ms);
 
   Serial.println("=== TRAJECTORY 4 DONE ===");
-    firstLap = true;   // ← ADD
+    firstLap = true;
+    slowSide2NextLap = true;   // ensures Side 2 slow on first lap
 
   waitMs(pause_ms);
 }
@@ -993,7 +1013,7 @@ Serial.println("=== Side 2 @ 90° (ENC) ===");
 long savedSide2Slow = ENC_SIDE2_SLOW_COUNT;
 ENC_SIDE2_SLOW_COUNT = (firstLap || slowSide2NextLap) ? 0 : ENC_SIDE2_SLOW_COUNT;
 resetEncoder();
-int side2Speed = (firstLap || slowSide2NextLap) ? 100 : FWD_BASE_SPEED_4;
+int side2Speed = (firstLap || slowSide2NextLap) ? 70 : 80;
 executeDriveUntilEncSpeed(90.0 + offset1, ENC_SIDE2_SLOW_COUNT, ENC_SIDE2_STOP_COUNT, 200, side2Speed);
 ENC_SIDE2_SLOW_COUNT = savedSide2Slow;
 slowSide2NextLap = false;
@@ -1021,12 +1041,13 @@ bool isLap3Special = false;
 long side4SlowCount = ENC_SIDE4_SLOW_COUNT;
 long side4StopCount = ENC_SIDE4_STOP_COUNT;
 if (lap3Counter >= 3) {
-  side4SlowCount = 130;
-  side4StopCount = 170;
+  side4SlowCount = 100;
+  side4StopCount = 150;
   side4Offset2   = -5.0;
   lap3Counter    = 0;
   isLap3Special  = true;
   slowSide2NextLap = true;   // ← ADD THIS
+  lap3Side1NextCall = true;  // next Side 1 uses lap3 encoder counts
 }
 resetEncoder();
 executeDriveUntilEncSpeed(-90.0 - side4Offset2, side4SlowCount, side4StopCount, 200, FWD_BASE_SPEED_2);
@@ -1065,15 +1086,19 @@ void runRectangleLap() {
 
   resetEncoder();
 if (firstLap) {
-
-  ENC_SIDE1_SLOW_COUNT = 30;   // tune this — less distance on first lap
+  ENC_SIDE1_SLOW_COUNT = 30;    // tune this — less distance on first lap
   ENC_SIDE1_STOP_COUNT = 120;   // tune this
   firstLap = false;
+} else if (lap3Side1NextCall) {
+  ENC_SIDE1_SLOW_COUNT = ENC_SIDE1_LAP3_SLOW_COUNT;  // ★ lap3 special
+  ENC_SIDE1_STOP_COUNT = ENC_SIDE1_LAP3_STOP_COUNT;
+  lap3Side1NextCall = false;
+  Serial.println("=== LAP3 SIDE1: using lap3 encoder counts ===");
 } else {
-  ENC_SIDE1_SLOW_COUNT = 600;   // restore normal values
+  ENC_SIDE1_SLOW_COUNT = 550;   // restore normal values
   ENC_SIDE1_STOP_COUNT = 750;
 }
-executeDriveUntilCloseSpeed(5.0, STOP_DISTANCE_CM, true, false, FWD_BASE_SPEED_2);
+executeDriveUntilCloseSpeed(5.0, STOP_DISTANCE_CM, false, false, FWD_BASE_SPEED_2);
   // waitMs(pause_ms);
 
   Serial.println("=== RECT: Turn 1 → 45° ===");
@@ -1087,6 +1112,12 @@ executeDriveUntilCloseSpeed(5.0, STOP_DISTANCE_CM, true, false, FWD_BASE_SPEED_2
 
   Serial.println("=== RECT(S3): Turn 1B → 90° ===");
   executeTurn(45.0 + offset1);
+
+    Serial.println("=== RECT: SHOOT after Turn1B ===");
+  servoWrite(SERVO_SHOOT);
+  delay(350);
+  servoWrite(SERVO_NEUTRAL);
+  waitMs(pause_ms);
   // servoWrite(SERVO_NEUTRAL);   // ← release shoot after Turn 1
 waitMs(pause_ms);
   lapCounter++;
@@ -1119,7 +1150,7 @@ Serial.println("=== Side 2 @ 90° (ENC) ===");
 long savedSide2Slow = ENC_SIDE2_SLOW_COUNT;
 ENC_SIDE2_SLOW_COUNT = (firstLap || slowSide2NextLap) ? 0 : ENC_SIDE2_SLOW_COUNT;
 resetEncoder();
-int side2Speed = (firstLap || slowSide2NextLap) ? 100 : FWD_BASE_SPEED_4;
+int side2Speed = (firstLap || slowSide2NextLap) ? 70 : 80;
 executeDriveUntilEncSpeed(90.0 + offset1, ENC_SIDE2_SLOW_COUNT, ENC_SIDE2_STOP_COUNT, 200, side2Speed);
 ENC_SIDE2_SLOW_COUNT = savedSide2Slow;
 slowSide2NextLap = false;
@@ -1146,12 +1177,13 @@ bool isLap3Special = false;
 long side4SlowCount = ENC_SIDE4_SLOW_COUNT;
 long side4StopCount = ENC_SIDE4_STOP_COUNT;
 if (lap3Counter >= 3) {
-  side4SlowCount = 130;
-  side4StopCount = 170;
+  side4SlowCount = 100;
+  side4StopCount = 150;
   side4Offset2   = -5.0;
   lap3Counter    = 0;
   isLap3Special  = true;
   slowSide2NextLap = true;   // ← ADD THIS
+  lap3Side1NextCall = true;  // next Side 1 uses lap3 encoder counts
 }
 
 // SIDE 4 — encoder-based
@@ -1215,12 +1247,13 @@ void runRectangleLapFromSide3() {
   long side4StopCount = ENC_SIDE4_STOP_COUNT;
 
 if (lap3Counter >= 3) {
-  side4SlowCount = 130;
-  side4StopCount = 170;
+  side4SlowCount = 100;
+  side4StopCount = 150;
   side4Offset2   = -5.0;
   lap3Counter    = 0;
   isLap3Special  = true;
   slowSide2NextLap = true;   // ← ADD THIS
+  lap3Side1NextCall = true;  // next Side 1 uses lap3 encoder counts
 }
 
   // SIDE 4 — encoder-based
@@ -1244,19 +1277,28 @@ waitMs(pause_ms);
   // Side 1 finishes instead (see block below).
 Serial.println("=== RECT(S3): Side 1 @ 0° (TOF) ===");
 long savedSide1Slow = ENC_SIDE1_SLOW_COUNT;
-ENC_SIDE1_SLOW_COUNT = wasFirstLap ? 0 : ENC_SIDE1_SLOW_COUNT;
+long savedSide1Stop = ENC_SIDE1_STOP_COUNT;
+if (wasFirstLap) {
+  ENC_SIDE1_SLOW_COUNT = 0;
+} else if (lap3Side1NextCall) {
+  ENC_SIDE1_SLOW_COUNT = ENC_SIDE1_LAP3_SLOW_COUNT;  // ★ lap3 special
+  ENC_SIDE1_STOP_COUNT = ENC_SIDE1_LAP3_STOP_COUNT;
+  lap3Side1NextCall = false;
+  Serial.println("=== LAP3 SIDE1: using lap3 encoder counts ===");
+}
 resetEncoder();
-executeDriveUntilCloseSpeed(0.0 - offset2, STOP_DISTANCE_CM, !isLap3Special, false, 92);
+executeDriveUntilCloseSpeed(0.0 - offset2, STOP_DISTANCE_CM, false, false, 92);
 ENC_SIDE1_SLOW_COUNT = savedSide1Slow;
+ENC_SIDE1_STOP_COUNT = savedSide1Stop;
 waitMs(pause_ms);
 
-  if (isLap3Special) {
-    // ── LAP 3 SPECIAL: shoot now — after Side 1, before Turn 1 ──
-    Serial.println("=== RECT(S3): LAP3 SPECIAL — SHOOT after Side1, before Turn1 ===");
-    servoWrite(SERVO_SHOOT);
-    delay(250);
-    servoWrite(SERVO_NEUTRAL);
-  }
+  // if (isLap3Special) {
+  //   // ── LAP 3 SPECIAL: shoot now — after Side 1, before Turn 1 ──
+  //   Serial.println("=== RECT(S3): LAP3 SPECIAL — SHOOT after Side1, before Turn1 ===");
+  //   servoWrite(SERVO_SHOOT);
+  //   delay(250);
+  //   servoWrite(SERVO_NEUTRAL);
+  // }
 
   Serial.println("=== RECT(S3): Turn 1 → 45° ===");
   // executeTurn(SHOOT_HEADING_DEG);
@@ -1269,6 +1311,13 @@ waitMs(pause_ms);
 
   Serial.println("=== RECT(S3): Turn 1B → 90° ===");
   executeTurn(45.0+ offset1);
+
+    // ── SHOOT after Turn 1B, before Side 2 ──
+  Serial.println("=== RECT(S3): SHOOT after Turn1B ===");
+  servoWrite(SERVO_SHOOT);
+  delay(350);
+  servoWrite(SERVO_NEUTRAL);
+  waitMs(pause_ms);
   waitMs(pause_ms);
 lapCounter++;
 if (lapCounter >= 2) {
@@ -1296,7 +1345,7 @@ Serial.println("=== RECT(S3): Side 2 @ 90° (ENC) ===");
 long savedSide2Slow = ENC_SIDE2_SLOW_COUNT;
 ENC_SIDE2_SLOW_COUNT = (wasFirstLap || slowSide2NextLap) ? 0 : ENC_SIDE2_SLOW_COUNT;
 resetEncoder();
-int side2Speed = (wasFirstLap || slowSide2NextLap) ? 100 : FWD_BASE_SPEED_4;
+int side2Speed = (wasFirstLap || slowSide2NextLap) ? 70 : 80;
 executeDriveUntilEncSpeed(90.0 + offset1, ENC_SIDE2_SLOW_COUNT, ENC_SIDE2_STOP_COUNT, 200, side2Speed);
 ENC_SIDE2_SLOW_COUNT = savedSide2Slow;
 slowSide2NextLap = false;   // ← clear it after use
@@ -1430,12 +1479,13 @@ bool isLap3Special = false;
 long side4SlowCount = ENC_SIDE4_SLOW_COUNT;
 long side4StopCount = ENC_SIDE4_STOP_COUNT;
 if (lap3Counter >= 3) {
-  side4SlowCount = 130;
-  side4StopCount = 170;
+  side4SlowCount = 100;
+  side4StopCount = 150;
   side4Offset2   = -5.0;
   lap3Counter    = 0;
   isLap3Special  = true;
   slowSide2NextLap = true;   // ← ADD THIS
+  lap3Side1NextCall = true;  // next Side 1 uses lap3 encoder counts
 }
 resetEncoder();
 executeDriveUntilEncSpeed(-90.0 - side4Offset2, side4SlowCount, side4StopCount, 200, FWD_BASE_SPEED_2);
@@ -1489,7 +1539,7 @@ Serial.println("=== Side 2 @ 90° (ENC) ===");
 long savedSide2Slow = ENC_SIDE2_SLOW_COUNT;
 ENC_SIDE2_SLOW_COUNT = (firstLap || slowSide2NextLap) ? 0 : ENC_SIDE2_SLOW_COUNT;
 resetEncoder();
-int side2Speed = (firstLap || slowSide2NextLap) ? 100 : FWD_BASE_SPEED_4;
+int side2Speed = (firstLap || slowSide2NextLap) ? 70 : 80;
 executeDriveUntilEncSpeed(90.0 + offset1, ENC_SIDE2_SLOW_COUNT, ENC_SIDE2_STOP_COUNT, 200, side2Speed);
 ENC_SIDE2_SLOW_COUNT = savedSide2Slow;
 slowSide2NextLap = false;
@@ -1569,7 +1619,7 @@ void executeDriveUntilCloseSpeed(float targetHeading, float stopDistCm, bool sho
       servoShot = true;
       Serial.println("Side1: servo SHOOT at 50ms");
     }
-    if (reverseIntakeAtStart && !intakeSwitched && elapsed >= 500) {
+    if (reverseIntakeAtStart && !intakeSwitched && elapsed >= 900) {
       intakeOn();
       servoWrite(SERVO_NEUTRAL);
       intakeSwitched = true;
